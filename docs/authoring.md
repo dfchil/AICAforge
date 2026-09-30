@@ -17,9 +17,9 @@ Standard MIDI file and emits strict AFB/AFX/AFC/AFV assets. For example:
 
 ```sh
 make compiler
-build/afx_compile_c song.mid song.afb song.afx
+build/afx_compile song.mid song.afb song.afx
 # Or use one raw, little-endian PCM16 source (root key 69):
-build/afx_compile_c song.mid instrument.pcm song.afb song.afx
+build/afx_compile song.mid instrument.pcm song.afb song.afx
 ```
 
 The current PCM input is raw little-endian PCM16 at AICA's 44.1 kHz playback
@@ -40,7 +40,7 @@ Every MIDI note must match exactly one zone. The compiler emits one 32-byte
 aligned AFB payload and one setup/relocation per zone:
 
 ```sh
-build/afx_compile_c song.mid --zones instrument.zones song.afb song.afx
+build/afx_compile song.mid --zones instrument.zones song.afb song.afx
 ```
 
 For SoundFont input, no Python package is needed. The C reader uses each
@@ -51,7 +51,7 @@ for looped sources), then uses the established PCM8 baseline. PCM16 remains
 an explicit mapping choice when a source needs it:
 
 ```sh
-build/afx_compile_c song.mid --sf2 auto GeneralUser.sf2 song.afb song.afx
+build/afx_compile song.mid --sf2 auto GeneralUser.sf2 song.afb song.afx
 ```
 
 Several songs can share one AFB. An `.afbm` text map declares any number of
@@ -69,7 +69,7 @@ song field_theme midi/field_theme.mid
 ```
 
 ```sh
-build/afx_bank_c library.afbm output music.afb
+build/afx_bank library.afbm output music.afb
 ```
 
 The result is one `music.afb`, plus `title_theme.afx/.afc/.afv` and
@@ -78,16 +78,16 @@ the generated bank identity at load time.
 
 ## Performance profiles
 
-`build/afx_profile_c init` creates an editable JSON `.afp` file from an
+`build/afx_profile init` creates an editable JSON `.afp` file from an
 already-built AFX. It binds the sidecar to that exact base with SHA-256 and
 lists every NOTE event by its stable `{tick, ordinal, channel}` identity. The
 initial `all-notes` template makes the common case visible before an editor
 splits it into named tone templates.
 
 ```sh
-build/afx_profile_c init song.afx song.afp room 112
+build/afx_profile init song.afx song.afp room 112
 # edit song.afp offline
-build/afx_profile_c apply song.afx song.afc song.afp song-performance.afx song-performance.afc
+build/afx_profile apply song.afx song.afc song.afp song-performance.afx song-performance.afc
 ```
 
 The current C applier implements the shared DSP scene and send in the `dsp`
@@ -101,7 +101,7 @@ to a different set of notes.
 To create a map instead of writing the initial MIDI-program mapping by hand:
 
 ```sh
-build/afx_bank_c --create-map library.afbm GeneralUser.sf2 \
+build/afx_bank --create-map library.afbm GeneralUser.sf2 \
   title_theme midi/title_theme.mid field_theme midi/field_theme.mid
 ```
 

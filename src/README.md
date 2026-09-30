@@ -4,17 +4,17 @@ Build the host compiler from the repository root:
 
 ```sh
 make compiler
-build/afx_compile_c song.mid --zones instrument.zones song.afb song.afx
+build/afx_compile song.mid --zones instrument.zones song.afb song.afx
 ```
 
-`afx_profile_c` is the companion offline performance step. It binds an
+`afx_profile` is the companion offline performance step. It binds an
 editable `.afp` JSON sidecar to one exact base AFX, creates a stable inventory
 of every note event and applies the sidecar's DSP scene/send setting to a
 derived AFX plus its matching AFC seek index:
 
 ```sh
-build/afx_profile_c init song.afx song.afp room 112
-build/afx_profile_c apply song.afx song.afc song.afp song-performance.afx song-performance.afc
+build/afx_profile init song.afx song.afp room 112
+build/afx_profile apply song.afx song.afc song.afp song-performance.afx song-performance.afc
 ```
 
 The compiler emits `song.afb`, `song.afx`, `song.afc`, and `song.afv` together.
@@ -46,7 +46,7 @@ and loop mode, then expands intentional SF2 layers before emitting ordinary
 AICA setup records:
 
 ```sh
-build/afx_compile_c song.mid --sf2 auto GeneralUser.sf2 song.afb song.afx
+build/afx_compile song.mid --sf2 auto GeneralUser.sf2 song.afb song.afx
 ```
 
 To make one bank shared by several pieces, create an `.afbm` bank map. It is
@@ -68,7 +68,7 @@ song field_theme midi/field_theme.mid
 ```
 
 ```sh
-build/afx_bank_c library.afbm output music.afb
+build/afx_bank library.afbm output music.afb
 ```
 
 This writes `output/music.afb` and `output/<basename>.afx/.afc/.afv` for each
@@ -81,6 +81,6 @@ Generate an editable starting map from one SoundFont and one or more MIDI
 inputs; the generated mappings use `auto` and can be revised afterwards:
 
 ```sh
-build/afx_bank_c --create-map library.afbm GeneralUser.sf2 \
+build/afx_bank --create-map library.afbm GeneralUser.sf2 \
   title_theme midi/title_theme.mid field_theme midi/field_theme.mid
 ```
