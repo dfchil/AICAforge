@@ -12,6 +12,7 @@ int main(void) {
     afx_c_output_t out;
     assert(!afx_c_compile_sine(notes, 2, 1000, &out));
     assert(afx_file_validate(out.afx, out.afx_bytes, NULL) == AFX_OK);
+    assert(afx_read16(out.afx + afx_read32(out.afx + 16) + 18) == 0x0f10);
     assert(out.afc_bytes == 64 && afx_read32(out.afc) == AFX_SEEK_MAGIC);
     assert(out.afv_bytes > 12 && !memcmp(out.afv, "VIZ1", 4));
     afx_c_output_t repeat;

@@ -232,7 +232,8 @@ sample_known:;
         afx_write16(state + 4, zones[i].sample.loop_start); afx_write16(state + 6, zones[i].sample.loop_end);
         afx_write16(state + 8, 0x001f); afx_write16(state + 10, 0x001f);
         afx_write16(state + 16, zones[i].dsp_send);
-        afx_write16(state + 18, 0x0010); afx_write16(state + 20, 0x0024);
+        /* DISDL must be nonzero: 0x0010 has centre pan but mutes direct audio. */
+        afx_write16(state + 18, 0x0f10); afx_write16(state + 20, 0x0024);
         for (uint32_t field = 11; field < 16; ++field) afx_write16(state + 2 * field, 0x1fffu);
         uint8_t *relocation = afx + AFX_HEADER + i * RELOCATION_BYTES;
         afx_write32(relocation, i * AFX_SETUP_BYTES); afx_write32(relocation + 4, offsets[i]);
