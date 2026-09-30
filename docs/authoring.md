@@ -8,7 +8,9 @@ Mappings select source samples and their explicit AICA sample coding
 (`pcm16`, `pcm8`, `adpcm`, or `auto`). A `.afp` performance profile is an offline-only description of
 register-level changes and DSP use: it produces a new AFX but never changes NOTE or KEYOFF
 timing. Use the music source for timing and use `.afp` for timbre,
-articulation and room treatment.
+articulation and room treatment. The exact file roles and binary layouts are in
+[Assets and sidecars](specs/assets.md); this guide is the human workflow for
+creating them.
 
 `make compiler` builds the host tool. It reads the note and tempo subset of a
 Standard MIDI file and emits strict AFB/AFX/AFC/AFV assets. For example:
