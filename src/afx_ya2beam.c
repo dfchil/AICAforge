@@ -1,6 +1,5 @@
-/Users/drxl/.zprofile:6: command not found: pyenv
 /*
-    ya2beam - full-buffer beam-search AICA-ADPCM encoder, callable from Python.
+    ya2beam - full-buffer beam-search AICA-ADPCM encoder.
 
     This is the byte-exact C equivalent of tools/aica/yamaha_adpcm_v2.py::encode
     (the SF64 build's "ya2" beam encoder). It reuses wavbeam.c's verified beam_step
@@ -11,9 +10,8 @@
     best final node). Memory is O(n * width * 2) bytes for the backtrack table,
     same growth as the Python list.
 
-    Built on demand by ya2beam_c.py (cc -O3 -shared -fPIC). Pure integer inner loop
-    -> ~100x the pure-Python encoder, which is the whole point: the SF64 audio build
-    runs from scratch (no cache) in low-compute Colab and was timing out.
+    The native authoring tools link this directly. Pure integer inner loop keeps
+    full-buffer quality practical without a Python encoder in the build path.
 */
 #include <stdint.h>
 #include <stdlib.h>
@@ -156,4 +154,3 @@ int n64_vadpcm_decode(const uint8_t *data, int data_len, const int16_t *coef,
     }
     return 0;
 }
-

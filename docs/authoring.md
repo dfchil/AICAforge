@@ -1,22 +1,17 @@
 # Authoring
 
-The current offline compiler converts a MIDI timeline and mapping JSON into one
-AFB and one bank-bound AFX. It may also emit an optional AFC seek sidecar.
+The supported offline authoring path is native C. It converts a MIDI timeline
+and explicit raw-sample zone map into one AFB and a bank-bound AFX, then writes
+matching AFC seek and AFV visualizer sidecars beside the AFX.
 
-```sh
-python3 tools/afx_compile.py song.mid mapping.json song.afx --bank song.afb
-```
-
-Mappings select source samples, AICA envelopes, filters, LFO and DSP-send
-values. A `.afp` performance profile is an offline-only description of
+Mappings select source samples and their explicit AICA sample coding
+(`pcm16`, `pcm8`, `adpcm`, or `auto`). A `.afp` performance profile is an offline-only description of
 register-level changes: it produces a new AFX but never changes NOTE or KEYOFF
 timing. Use the music source for timing and use `.afp` for timbre and
 articulation.
 
-The generic compiler currently remains Python tooling. `make compiler`
-also builds the first C encoder: it reads the note and tempo subset of a
-Standard MIDI file and emits a strict AFB/AFX pair with a built-in sine source.
-For example:
+`make compiler` builds the host tool. It reads the note and tempo subset of a
+Standard MIDI file and emits strict AFB/AFX/AFC/AFV assets. For example:
 
 ```sh
 make compiler
@@ -33,9 +28,9 @@ authoring layer.
 The C compiler also accepts a small text zone map for key-split instruments:
 
 ```text
-# key_min key_max root_key loop_start loop_end pcm_path
-0 65 48 -1 -1 bass.pcm
-66 127 72 0 1023 lead_cycle.pcm
+# key_min key_max root_key loop_start loop_end format pcm_path
+0 65 48 -1 -1 pcm8 bass.pcm
+66 127 72 0 1023 auto lead_cycle.pcm
 ```
 
 `-1 -1` means one-shot; other loop bounds are inclusive PCM frame indices.
@@ -46,8 +41,48 @@ aligned AFB payload and one setup/relocation per zone:
 build/afx_compile_c song.mid --zones instrument.zones song.afb song.afx
 ```
 
-The initial C reader intentionally accepts only the timing and note subset
-(including running status, tempo, note-off and all-notes-off). It deliberately
-shares the public wire validator with the driver. Instrument mapping and
-sampled-bank authoring will be added on top of this C encoder rather than
-creating a second file format or runtime path.
+For SoundFont input, no Python package is needed. The C reader uses each
+note's MIDI bank/program to select SF2 preset and instrument zones. The
+requested encoding is explicit; `auto` chooses the smallest format passing the
+same deterministic quality gate as zone maps (and conservatively skips ADPCM
+for looped sources), then uses the established PCM8 baseline. PCM16 remains
+an explicit mapping choice when a source needs it:
+
+```sh
+build/afx_compile_c song.mid --sf2 auto GeneralUser.sf2 song.afb song.afx
+```
+
+Several songs can share one AFB. An `.afbm` text map declares any number of
+SoundFont sources, routes each MIDI bank/program pair to a source preset, and
+states that mapping's format. This also lets one song combine samples from
+several SoundFonts while runtime still sees exactly one bank:
+
+```text
+source gm        soundfonts/GeneralUser.sf2
+source orchestra soundfonts/orchestra.sf2
+map * 0 0  gm        0 0  auto
+map * 0 42 orchestra 0 42 pcm16
+song title_theme midi/title_theme.mid
+song field_theme midi/field_theme.mid
+```
+
+```sh
+build/afx_bank_c library.afbm output music.afb
+```
+
+The result is one `music.afb`, plus `title_theme.afx/.afc/.afv` and
+`field_theme.afx/.afc/.afv`. AFX remains sample-free; every flow is bound to
+the generated bank identity at load time.
+
+To create a map instead of writing the initial MIDI-program mapping by hand:
+
+```sh
+build/afx_bank_c --create-map library.afbm GeneralUser.sf2 \
+  title_theme midi/title_theme.mid field_theme midi/field_theme.mid
+```
+
+The initial C reader accepts timing and note events (including running status,
+tempo, note-off and all-notes-off). It deliberately shares the public wire
+validator with the driver. The former Python implementation is retained under
+`tools/research/` only as a reference and test aid; it is not the format or
+runtime authority.

@@ -3,7 +3,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-typedef struct { uint32_t start, end; uint8_t key, velocity; } raw_note_t;
+typedef struct {
+    uint32_t start, end;
+    uint8_t key, velocity, bank_msb, bank_lsb, program;
+} raw_note_t;
 typedef struct { uint32_t tick, usec, order; } tempo_t;
 
 static uint32_t be16(const uint8_t *p) { return (uint32_t)p[0] << 8 | p[1]; }
@@ -73,6 +76,7 @@ int afx_c_midi_notes(const void *input, uint32_t bytes, uint32_t tick_rate,
     *out_notes = NULL; *out_count = 0;
     for (uint32_t track = 0; track < tracks; ++track) {
         int32_t active[16][128];
+        uint8_t bank_msb[16] = {0}, bank_lsb[16] = {0}, program[16] = {0};
         uint32_t end, tick = 0; uint8_t running = 0;
         memset(active, 0xff, sizeof(active));
         if (at > bytes - 8 || memcmp(data + at, "MTrk", 4)) goto failed;
@@ -98,13 +102,19 @@ int afx_c_midi_notes(const void *input, uint32_t bytes, uint32_t tick_rate,
                 if (kind == 0x90u && b) {
                     if (active[channel][a] >= 0) raw[active[channel][a]].end = tick;
                     if (grow((void **)&raw, &raw_capacity, sizeof(*raw), raw_count)) goto failed;
-                    raw[raw_count] = (raw_note_t){tick, 0, a, b}; active[channel][a] = (int32_t)raw_count++;
+                    raw[raw_count] = (raw_note_t){tick, 0, a, b, bank_msb[channel],
+                                                   bank_lsb[channel], program[channel]};
+                    active[channel][a] = (int32_t)raw_count++;
                 } else if (kind == 0x80u || (kind == 0x90u && !b)) {
                     if (active[channel][a] >= 0) {
                         raw[active[channel][a]].end = tick; active[channel][a] = -1;
                     }
-                } else if (kind == 0xb0u && (a == 120u || a == 123u)) {
-                    close_channel(raw, active, channel, tick);
+                } else if (kind == 0xb0u) {
+                    if (a == 0u) bank_msb[channel] = b;
+                    else if (a == 32u) bank_lsb[channel] = b;
+                    else if (a == 120u || a == 123u) close_channel(raw, active, channel, tick);
+                } else if (kind == 0xc0u) {
+                    program[channel] = a;
                 }
                 continue;
             }
@@ -138,7 +148,8 @@ int afx_c_midi_notes(const void *input, uint32_t bytes, uint32_t tick_rate,
     for (uint32_t i = 0; i < raw_count; ++i) {
         result[i] = (afx_c_note_t){control_tick(raw[i].start, tempos, tempo_count, division, tick_rate),
                                    control_tick(raw[i].end, tempos, tempo_count, division, tick_rate),
-                                   raw[i].key, raw[i].velocity};
+                                   raw[i].key, raw[i].velocity, raw[i].bank_msb,
+                                   raw[i].bank_lsb, raw[i].program, 0};
         if (result[i].end_tick <= result[i].start_tick) { free(result); goto failed; }
     }
     free(raw); free(tempos); *out_notes = result; *out_count = raw_count; return 0;

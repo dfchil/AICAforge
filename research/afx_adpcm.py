@@ -18,7 +18,7 @@ import tempfile
 import threading
 
 _QUANT = (230, 230, 230, 230, 307, 409, 512, 614)
-_SRC = Path(__file__).with_name("afx_ya2beam.c")
+_SRC = Path(__file__).resolve().parents[1] / "author" / "afx_ya2beam.c"
 _LOCK = threading.Lock()
 _LIBRARY: ctypes.CDLL | bool | None = None
 
