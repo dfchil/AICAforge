@@ -26,9 +26,25 @@ build/afx_compile_c song.mid instrument.pcm song.afb song.afx
 ```
 
 The current PCM input is raw little-endian PCM16 at AICA's 44.1 kHz playback
-rate and uses MIDI key 69 as its root. It is intentionally a one-shot source;
-explicit looping, resampling, multiple zones and register-level articulation
-remain the next C authoring layer.
+rate and uses MIDI key 69 as its root. This short form is intentionally a
+one-shot source; resampling and register-level articulation remain the next C
+authoring layer.
+
+The C compiler also accepts a small text zone map for key-split instruments:
+
+```text
+# key_min key_max root_key loop_start loop_end pcm_path
+0 65 48 -1 -1 bass.pcm
+66 127 72 0 1023 lead_cycle.pcm
+```
+
+`-1 -1` means one-shot; other loop bounds are inclusive PCM frame indices.
+Every MIDI note must match exactly one zone. The compiler emits one 32-byte
+aligned AFB payload and one setup/relocation per zone:
+
+```sh
+build/afx_compile_c song.mid --zones instrument.zones song.afb song.afx
+```
 
 The initial C reader intentionally accepts only the timing and note subset
 (including running status, tempo, note-off and all-notes-off). It deliberately

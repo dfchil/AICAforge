@@ -22,6 +22,17 @@ typedef struct {
     uint16_t loop_start, loop_end;
 } afx_c_pcm16_t;
 
+typedef struct {
+    afx_c_pcm16_t sample;
+    uint8_t key_min, key_max;
+} afx_c_zone_t;
+
+/* Every note must select exactly one key range. The zones become the AFB's
+ * contiguous, 32-byte aligned samples and the AFX setup dictionary. */
+int afx_c_compile_zones(const afx_c_note_t *notes, uint32_t count,
+                        uint32_t tick_rate, const afx_c_zone_t *zones,
+                        uint32_t zone_count, afx_c_output_t *out);
+
 /* Compile a resolved timeline against one explicit PCM16 sample. */
 int afx_c_compile_pcm16(const afx_c_note_t *notes, uint32_t count,
                         uint32_t tick_rate, const afx_c_pcm16_t *sample,

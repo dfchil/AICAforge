@@ -22,6 +22,17 @@ int main(void) {
     assert(afx_file_validate(out.afx, out.afx_bytes, NULL) == AFX_OK);
     assert(out.afb_bytes == 32 + sizeof(pcm) && !memcmp(out.afb + 32, pcm, sizeof(pcm)));
     afx_c_output_free(&out);
+    const afx_c_note_t split_notes[] = {{0, 100, 60, 100}, {100, 200, 72, 100}};
+    const afx_c_zone_t zones[] = {
+        {{pcm, 4, 60, 0, 0, 3}, 0, 65},
+        {{pcm, 4, 72, 1, 0, 3}, 66, 127},
+    };
+    assert(!afx_c_compile_zones(split_notes, 2, 1000, zones, 2, &out));
+    assert(afx_file_validate(out.afx, out.afx_bytes, NULL) == AFX_OK);
+    assert(afx_read32(out.afx + 36) == 2 && afx_read32(out.afx + 52) == 2);
+    assert(afx_read32(out.afx + 80 + 4) == 0 && afx_read32(out.afx + 92 + 4) == 32);
+    assert(out.afb_bytes == 72);
+    afx_c_output_free(&out);
     const unsigned char midi[] = {
         'M','T','h','d', 0,0,0,6, 0,0, 0,1, 1,224,
         'M','T','r','k', 0,0,0,20,
