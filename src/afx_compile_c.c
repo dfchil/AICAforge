@@ -100,9 +100,36 @@ static int build_seek(afx_c_output_t *out, uint32_t control_id, uint32_t bank_lo
     return 0;
 }
 
+static double note_frequency(uint8_t key) {
+    return 440.0 * pow(2.0, ((int)key - 69) / 12.0);
+}
+
+static uint32_t visual_band(double frequency, double low, double high) {
+    if (high <= low) return VISUAL_BANDS / 2u;
+    int band = (int)lround((log2(frequency) - log2(low)) * (VISUAL_BANDS - 1u) /
+                           (log2(high) - log2(low)));
+    if (band < 0) return 0;
+    return band >= VISUAL_BANDS ? VISUAL_BANDS - 1u : (uint32_t)band;
+}
+
+static void visual_levels(const afx_c_note_t *notes, uint32_t count, uint64_t tick,
+                          uint32_t tick_rate, double low, double high,
+                          double levels[VISUAL_BANDS]) {
+    memset(levels, 0, sizeof(double) * VISUAL_BANDS);
+    for (uint32_t i = 0; i < count; ++i) {
+        if (tick < notes[i].start_tick || tick >= notes[i].end_tick) continue;
+        uint32_t attenuation = (127u - notes[i].velocity) * 2u;
+        double age = (double)(tick - notes[i].start_tick) / tick_rate;
+        double decay = pow(2.0, -2.0 * age / 0.6);
+        uint32_t band = visual_band(note_frequency(notes[i].key), low, high);
+        levels[band] += pow(10.0, -(double)attenuation / 25.0) * decay;
+    }
+}
+
 static int build_visual(const afx_c_note_t *notes, uint32_t count, uint32_t tick_rate,
                         afx_c_output_t *out) {
     uint32_t end = 0;
+    double low = note_frequency(notes[0].key), high = low, ceiling = 0;
     for (uint32_t i = 0; i < count; ++i) if (notes[i].end_tick > end) end = notes[i].end_tick;
     uint64_t frames64 = ((uint64_t)end * VISUAL_RATE + tick_rate - 1u) / tick_rate;
     if (!frames64 || frames64 > (UINT32_MAX - VISUAL_HEADER) / VISUAL_BANDS) return -1;
@@ -112,21 +139,26 @@ static int build_visual(const afx_c_note_t *notes, uint32_t count, uint32_t tick
     if (!out->afv) return -1;
     memcpy(out->afv, "VIZ1", 4); out->afv[4] = 1; out->afv[5] = VISUAL_BANDS;
     out->afv[6] = VISUAL_RATE; afx_write32(out->afv + 8, frames);
+    for (uint32_t i = 1; i < count; ++i) {
+        double frequency = note_frequency(notes[i].key);
+        if (frequency < low) low = frequency;
+        if (frequency > high) high = frequency;
+    }
     for (uint32_t frame = 0; frame < frames; ++frame) {
-        uint64_t tick = (uint64_t)frame * tick_rate / VISUAL_RATE;
-        unsigned levels[VISUAL_BANDS] = {0};
-        for (uint32_t i = 0; i < count; ++i) {
-            if (tick < notes[i].start_tick || tick >= notes[i].end_tick) continue;
-            double frequency = 440.0 * pow(2.0, ((int)notes[i].key - 69) / 12.0);
-            double normalized = log(frequency / 80.0) / log(5000.0 / 80.0);
-            int band = (int)floor(normalized * VISUAL_BANDS);
-            if (band < 0) band = 0;
-            if (band >= VISUAL_BANDS) band = VISUAL_BANDS - 1;
-            levels[band] += notes[i].velocity;
-        }
+        double levels[VISUAL_BANDS];
+        visual_levels(notes, count, (uint64_t)frame * tick_rate / VISUAL_RATE,
+                      tick_rate, low, high, levels);
+        for (uint32_t band = 0; band < VISUAL_BANDS; ++band)
+            if (levels[band] > ceiling) ceiling = levels[band];
+    }
+    if (!ceiling) ceiling = 1.0;
+    for (uint32_t frame = 0; frame < frames; ++frame) {
+        double levels[VISUAL_BANDS];
+        visual_levels(notes, count, (uint64_t)frame * tick_rate / VISUAL_RATE,
+                      tick_rate, low, high, levels);
         for (uint32_t band = 0; band < VISUAL_BANDS; ++band)
             out->afv[VISUAL_HEADER + frame * VISUAL_BANDS + band] =
-                (uint8_t)(levels[band] > 255 ? 255 : levels[band]);
+                (uint8_t)lround(255.0 * sqrt(levels[band] / ceiling));
     }
     return 0;
 }

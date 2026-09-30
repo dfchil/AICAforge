@@ -15,6 +15,9 @@ int main(void) {
     assert(afx_read16(out.afx + afx_read32(out.afx + 16) + 18) == 0x0f10);
     assert(out.afc_bytes == 64 && afx_read32(out.afc) == AFX_SEEK_MAGIC);
     assert(out.afv_bytes > 12 && !memcmp(out.afv, "VIZ1", 4));
+    /* Both active pitches cover the visual range; a later, quieter note must
+       still light a different band instead of collapsing a chord to one bar. */
+    assert(out.afv[12] > 0 && out.afv[12 + 15 * 32] > 0 && out.afv[12 + 15 * 32 + 31] > 0);
     afx_c_output_t repeat;
     assert(!afx_c_compile_sine(notes, 2, 1000, &repeat));
     assert(out.afb_bytes == repeat.afb_bytes && !memcmp(out.afb, repeat.afb, out.afb_bytes));
