@@ -91,12 +91,13 @@ build/afx_profile apply song.afx song.afc song.afp song-performance.afx song-per
 ```
 
 The current C applier implements the shared DSP scene and send in the `dsp`
-section (`dry`, `room`, `room_warm`, or `room_large`). It writes those sends
-into the derived AFX, updates its control identity and rewrites the matching
-AFC header. The generated tone inventory is the stable input for the targeted
-template rewrite; no profile is interpreted by SH4 or ARM7. An old profile
-intentionally fails after its AFX source changes rather than silently applying
-to a different set of notes.
+section (`dry`, `room`, `room_warm`, or `room_large`). `tempo_q8_8` is an
+optional whole-flow rate (`256` is authored speed) applied by SH4 at activation;
+it does not move individual notes. The applier writes sends into the derived
+AFX, updates its control identity and rewrites the matching AFC header. The
+generated tone inventory is the stable input for the targeted template rewrite;
+no profile is interpreted by ARM7. An old profile intentionally fails after its
+AFX source changes rather than silently applying to a different set of notes.
 
 To create a map instead of writing the initial MIDI-program mapping by hand:
 

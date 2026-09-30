@@ -9,7 +9,7 @@
 
 /* AFP is an offline transform. The parser accepts only the small documented
  * JSON schema; the Dreamcast never sees this data. */
-enum { PROFILE_VERSION = 2, PROFILE_NAME_BYTES = 48, PROFILE_TEMPLATES = 64 };
+enum { PROFILE_VERSION = 3, PROFILE_NAME_BYTES = 48, PROFILE_TEMPLATES = 64 };
 typedef struct { uint32_t mask; uint16_t values[AFX_FIELD_COUNT]; } params_t;
 typedef struct { char name[PROFILE_NAME_BYTES]; params_t parameters; } template_t;
 typedef struct {
@@ -17,7 +17,7 @@ typedef struct {
     char template_name[PROFILE_NAME_BYTES]; params_t parameters;
 } override_t;
 typedef struct {
-    char sha256[65], preset[32]; params_t defaults;
+    char sha256[65], preset[32]; uint16_t tempo_q8_8; params_t defaults;
     template_t templates[PROFILE_TEMPLATES]; uint32_t template_count;
     char (*setup_templates)[PROFILE_NAME_BYTES]; uint32_t setup_count;
     override_t *overrides; uint32_t override_count, override_capacity;
@@ -275,7 +275,7 @@ static int parse_overrides(const char *json, const json_token_t *tokens, int cou
 static void profile_free(profile_t *profile) { free(profile->setup_templates); free(profile->overrides); *profile = (profile_t){0}; }
 static int profile_read(const char *path, const uint8_t *base, uint32_t base_bytes, uint32_t setup_count, profile_t *out) {
     uint8_t *json = NULL; uint32_t bytes; json_token_t *tokens = NULL; int count, root, value; char format[32], sha[65]; unsigned version, afx_version;
-    *out = (profile_t){0}; out->setup_count = setup_count; out->setup_templates = calloc(setup_count ? setup_count : 1u, PROFILE_NAME_BYTES);
+    *out = (profile_t){.tempo_q8_8 = 256}; out->setup_count = setup_count; out->setup_templates = calloc(setup_count ? setup_count : 1u, PROFILE_NAME_BYTES);
     if (!out->setup_templates || read_file(path, &json, &bytes) || bytes > (UINT32_MAX - 64u) / 2u) goto failed;
     tokens = calloc((size_t)bytes * 2u + 64u, sizeof(*tokens));
     if (!tokens) goto failed;
@@ -291,6 +291,11 @@ static int profile_read(const char *path, const uint8_t *base, uint32_t base_byt
         (value = object_value((char *)json, tokens, count, root, "templates")) < 0 || parse_templates((char *)json, tokens, count, value, out) ||
         (value = object_value((char *)json, tokens, count, root, "setup_templates")) < 0 || parse_setup_templates((char *)json, tokens, count, value, out) ||
         (value = object_value((char *)json, tokens, count, root, "overrides")) < 0 || parse_overrides((char *)json, tokens, count, value, out)) goto failed;
+    if ((value = object_value((char *)json, tokens, count, root, "tempo_q8_8")) >= 0) {
+        unsigned tempo;
+        if (token_unsigned((char *)json, tokens, value, &tempo) || tempo < 16 || tempo > 4096) goto failed;
+        out->tempo_q8_8 = (uint16_t)tempo;
+    }
     digest(base, base_bytes, out->sha256);
     if (strcmp(sha, out->sha256)) goto failed;
     for (uint32_t i = 0; i < setup_count; ++i) if (out->setup_templates[i][0] && !find_template(out, out->setup_templates[i])) goto failed;
@@ -311,7 +316,7 @@ static int profile_write(const char *path, const uint8_t *base, uint32_t bytes, 
     int failed = fprintf(file,
         "{\n  \"format\": \"aicaflow.afp\",\n  \"version\": %u,\n"
         "  \"base\": { \"afx_version\": %u, \"canonical_sha256\": \"%s\" },\n"
-        "  \"dsp\": { \"preset\": \"%s\" },\n  \"defaults\": %s,\n"
+        "  \"dsp\": { \"preset\": \"%s\" },\n  \"tempo_q8_8\": 256,\n  \"defaults\": %s,\n"
         "  \"templates\": {},\n  \"setup_templates\": {},\n  \"overrides\": []\n}\n",
         PROFILE_VERSION, AFX_FILE_VERSION, sha, preset, defaults) < 0;
     failed |= fclose(file); return failed ? -1 : 0;
@@ -426,7 +431,7 @@ int main(int argc, char **argv) {
         if (!read_file(argv[2], &afx, &bytes) && !afx_file_validate(afx, bytes, NULL) &&
             !afx_file_validate(afx, bytes, &header) && !profile_read(argv[3], afx, bytes, header.setup_count, &profile)) {
             unsigned send = profile.defaults.mask & (1u << AFX_FIELD_DSP_SEND) ? profile.defaults.values[AFX_FIELD_DSP_SEND] : 0;
-            printf("%s %u\n", profile.preset, send); profile_free(&profile); free(afx); return 0;
+            printf("%s %u %u\n", profile.preset, send, profile.tempo_q8_8); profile_free(&profile); free(afx); return 0;
         }
         free(afx); return fprintf(stderr, "invalid profile\n"), 1;
     }
