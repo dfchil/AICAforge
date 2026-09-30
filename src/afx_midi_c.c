@@ -149,7 +149,7 @@ int afx_c_midi_notes(const void *input, uint32_t bytes, uint32_t tick_rate,
         result[i] = (afx_c_note_t){control_tick(raw[i].start, tempos, tempo_count, division, tick_rate),
                                    control_tick(raw[i].end, tempos, tempo_count, division, tick_rate),
                                    raw[i].key, raw[i].velocity, raw[i].bank_msb,
-                                   raw[i].bank_lsb, raw[i].program, 0};
+                                   raw[i].bank_lsb, raw[i].program, 0, 0};
         if (result[i].end_tick <= result[i].start_tick) { free(result); goto failed; }
     }
     free(raw); free(tempos); *out_notes = result; *out_count = raw_count; return 0;

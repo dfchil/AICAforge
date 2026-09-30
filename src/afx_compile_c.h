@@ -14,6 +14,9 @@ typedef struct {
     /* Zero selects a zone by MIDI attributes. Nonzero is a one-based resolved
      * zone index used by importers which expand layered SoundFont notes. */
     uint16_t setup_index;
+    /* Zero uses the compiler's ordinary MIDI-velocity curve. Importers may
+     * lower a source instrument's velocity law to an exact AICA MIX word. */
+    uint16_t mix;
 } afx_c_note_t;
 
 typedef struct {
@@ -41,6 +44,11 @@ typedef struct {
     uint8_t bank_msb, bank_lsb, program;
     /* AICA DSP-send register byte: IMXL in the high nibble, ISEL in low. */
     uint8_t dsp_send;
+    /* Offline importers can lower an instrument's static controls straight
+     * into the setup template.  These are ordinary AICA register words, not
+     * another runtime abstraction. */
+    uint32_t setup_mask;
+    uint16_t setup[AFX_FIELD_COUNT];
 } afx_c_zone_t;
 
 /* Every note must select exactly one key range. The zones become the AFB's

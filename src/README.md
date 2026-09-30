@@ -56,14 +56,15 @@ build/afx_compile song.mid --sf2 auto GeneralUser.sf2 song.afb song.afx
 ```
 
 To make one bank shared by several pieces, create an `.afbm` bank map. It is
-the editable source of truth: `source` declares any number of SoundFonts, and
+the editable source of truth: `source` declares any number of SoundFonts (with
+an optional `stereo`, `left`, or `right` channel selection), and
 each `map` routes a MIDI bank/program pair to an SF2 bank/program and explicitly
 chooses that mapping's sample format. A song may therefore use several source
 banks without creating a second runtime bank type.
 
 ```text
 source gm        soundfonts/GeneralUser.sf2
-source orchestra soundfonts/orchestra.sf2
+source orchestra soundfonts/orchestra.sf2 stereo
 
 # map <song|*> <midi-bank> <midi-program> <source> <sf2-bank> <sf2-program> <format>
 map * 0 0  gm        0 0  auto

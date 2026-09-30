@@ -18,8 +18,10 @@ typedef struct {
     uint32_t note_count, zone_count, owned_count;
 } afx_c_sf2_output_t;
 
+enum { AFX_C_SF2_STEREO, AFX_C_SF2_LEFT, AFX_C_SF2_RIGHT };
+
 int afx_c_sf2_resolve(const char *path, const afx_c_note_t *notes, uint32_t count,
-                      uint8_t sample_format, afx_c_sf2_output_t *out);
+                      uint8_t sample_format, uint8_t channel, afx_c_sf2_output_t *out);
 void afx_c_sf2_output_free(afx_c_sf2_output_t *out);
 
 #endif

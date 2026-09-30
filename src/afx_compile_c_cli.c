@@ -86,8 +86,8 @@ static int load_zones(const char *path, afx_c_zone_t **out_zones, uint8_t ***out
         if (looping) {
             sample.loop = 1; sample.loop_start = (uint16_t)loop_start; sample.loop_end = (uint16_t)loop_end;
         }
-        zones[count] = (afx_c_zone_t){sample, (uint8_t)key_min, (uint8_t)key_max,
-                                      0, 127, 0, 0, 0, 0};
+        zones[count] = (afx_c_zone_t){.sample = sample, .key_min = (uint8_t)key_min,
+                                      .key_max = (uint8_t)key_max, .velocity_max = 127};
         owned[count++] = encoded;
     }
     fclose(file);
@@ -142,7 +142,7 @@ int main(int argc, char **argv) {
     if (!parsed && zones_mode && load_zones(argv[3], &zones, &owned, &zone_count)) parsed = -1;
     uint8_t sf2_format = 0;
     if (!parsed && sf2_mode && (afx_c_parse_sample_format(argv[3], &sf2_format) ||
-                                afx_c_sf2_resolve(argv[4], notes, count, sf2_format, &sf2))) parsed = -1;
+                                afx_c_sf2_resolve(argv[4], notes, count, sf2_format, AFX_C_SF2_STEREO, &sf2))) parsed = -1;
     int result = parsed || (argc == 5 && (!pcm || (pcm_bytes & 1))) ? -1 :
                  sf2_mode ? afx_c_compile_zones(sf2.notes, sf2.note_count, 1000,
                                                  sf2.zones, sf2.zone_count, &out) :

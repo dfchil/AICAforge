@@ -7,8 +7,8 @@
 #include <string.h>
 
 int main(void) {
-    const afx_c_note_t notes[] = {{0, 500, 69, 120, 0, 0, 0, 0},
-                                  {250, 750, 76, 100, 0, 0, 0, 0}};
+    const afx_c_note_t notes[] = {{0, 500, 69, 120, 0, 0, 0, 0, 0},
+                                  {250, 750, 76, 100, 0, 0, 0, 0, 0}};
     afx_c_output_t out;
     assert(!afx_c_compile_sine(notes, 2, 1000, &out));
     assert(afx_file_validate(out.afx, out.afx_bytes, NULL) == AFX_OK);
@@ -40,17 +40,33 @@ int main(void) {
     assert(format == AFX_ADPCM && encoded_bytes == 2); free(encoded);
     assert(!afx_c_encode_sample(pcm, 4, 1, AFX_SAMPLE_AUTO, &encoded, &encoded_bytes, &format));
     assert(format == AFX_PCM8); free(encoded);
-    const afx_c_note_t split_notes[] = {{0, 100, 60, 100, 0, 0, 0, 0},
-                                        {100, 200, 72, 100, 0, 0, 0, 0}};
+    const afx_c_note_t split_notes[] = {{0, 100, 60, 100, 0, 0, 0, 0, 0},
+                                        {100, 200, 72, 100, 0, 0, 0, 0, 0}};
     const afx_c_zone_t zones[] = {
-        {{pcm, sizeof(pcm), 4, AFX_PCM16, 60, 0, 0, 3, 0, 44100}, 0, 65, 0, 127, 0, 0, 0, 0},
-        {{pcm, sizeof(pcm), 4, AFX_PCM16, 72, 1, 0, 3, 0, 44100}, 66, 127, 0, 127, 0, 0, 0, 0},
+        {.sample = {pcm, sizeof(pcm), 4, AFX_PCM16, 60, 0, 0, 3, 0, 44100},
+         .key_min = 0, .key_max = 65, .velocity_max = 127},
+        {.sample = {pcm, sizeof(pcm), 4, AFX_PCM16, 72, 1, 0, 3, 0, 44100},
+         .key_min = 66, .key_max = 127, .velocity_max = 127},
     };
     assert(!afx_c_compile_zones(split_notes, 2, 1000, zones, 2, &out));
     assert(afx_file_validate(out.afx, out.afx_bytes, NULL) == AFX_OK);
     assert(afx_read32(out.afx + 36) == 2 && afx_read32(out.afx + 52) == 2);
     assert(afx_read32(out.afx + 80 + 4) == 0 && afx_read32(out.afx + 92 + 4) == 0);
     assert(out.afb_bytes == 32 + sizeof(pcm));
+    afx_c_output_free(&out);
+    /* Static source controls lower into ordinary setup words, while a source
+       velocity law can supply the NOTE's final MIX word. */
+    const afx_c_note_t controlled_note[] = {{0, 100, 60, 100, 0, 0, 0, 0, 0x4324}};
+    const afx_c_zone_t controlled_zone[] = {{
+        .sample = {pcm, sizeof(pcm), 4, AFX_PCM16, 60, 0, 0, 3, 0, 44100},
+        .key_max = 127, .velocity_max = 127, .dsp_send = 0x70,
+        .setup_mask = (1u << AFX_FIELD_ENV_AD) | (1u << AFX_FIELD_DIRECT),
+        .setup = {[AFX_FIELD_ENV_AD] = 0x1234, [AFX_FIELD_DIRECT] = 0x0f10}
+    }};
+    assert(!afx_c_compile_zones(controlled_note, 1, 1000, controlled_zone, 1, &out));
+    uint32_t image = afx_read32(out.afx + 16);
+    assert(afx_read16(out.afx + image + 8) == 0x1234 && afx_read16(out.afx + image + 16) == 0x70);
+    assert(afx_read16(out.afx + image + 36 + 6) == 0x4324);
     afx_c_output_free(&out);
     const unsigned char midi[] = {
         'M','T','h','d', 0,0,0,6, 0,0, 0,1, 1,224,

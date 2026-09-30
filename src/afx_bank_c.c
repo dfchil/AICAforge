@@ -10,7 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-typedef struct { char name[128], path[1024]; } source_t;
+typedef struct { char name[128], path[1024]; uint8_t channel; } source_t;
 typedef struct {
     char song[128];
     unsigned midi_bank, midi_program, sf2_bank, sf2_program;
@@ -207,15 +207,19 @@ static int parse_map(const char *path, source_t **out_sources, uint32_t *out_sou
     uint32_t source_count = 0, map_count = 0, song_count = 0;
     if (!file) return -1;
     while (fgets(line, sizeof(line), file)) {
-        char kind[16], c[128], f[16];
+        char kind[16], c[128], f[16], channel[16];
         char *cursor = line; while (*cursor == ' ' || *cursor == '\t') ++cursor;
         if (*cursor == '#' || *cursor == '\n' || !*cursor) continue;
         if (sscanf(cursor, "%15s", kind) != 1) goto failed;
         if (!strcmp(kind, "source")) {
             source_t item = {0}; char resolved[1200];
-            if (sscanf(cursor, "%15s %127s %1023s", kind, item.name, item.path) != 3 ||
+            int fields = sscanf(cursor, "%15s %127s %1023s %15s", kind, item.name, item.path, channel);
+            if (fields < 3 || fields > 4 || (fields == 4 && strcmp(channel, "stereo") &&
+                strcmp(channel, "left") && strcmp(channel, "right")) ||
                 map_count || song_count || find_source(sources, source_count, item.name) ||
                 relative_path(path, item.path, resolved)) goto failed;
+            item.channel = fields == 4 && !strcmp(channel, "left") ? AFX_C_SF2_LEFT :
+                           fields == 4 && !strcmp(channel, "right") ? AFX_C_SF2_RIGHT : AFX_C_SF2_STEREO;
             strcpy(item.path, resolved);
             source_t *grown = realloc(sources, (size_t)(source_count + 1u) * sizeof(*sources));
             if (!grown) goto failed;
@@ -275,7 +279,7 @@ static int resolve_song(song_t *song, map_t *maps, uint32_t map_count) {
         }
         afx_c_sf2_output_t resolved = {0};
         int resolve_result = afx_c_sf2_resolve(maps[map_index].source->path, selected, matching,
-                                               maps[map_index].format, &resolved);
+                                               maps[map_index].format, maps[map_index].source->channel, &resolved);
         int failed_resolve = resolve_result || append_resolved(&song->resolved, &resolved);
         free(selected); afx_c_sf2_output_free(&resolved);
         if (failed_resolve) goto failed;
@@ -319,7 +323,7 @@ static int create_map(int argc, char **argv) {
     if (!file) { free(programs); return -1; }
     int failed = fprintf(file,
         "# AICAflow bank map. Edit source/map lines to combine SoundFonts or tune formats.\n"
-        "# source <name> <soundfont.sf2>\n"
+        "# source <name> <soundfont.sf2> [stereo|left|right]\n"
         "# map <song|*> <midi-bank> <midi-program> <source> <sf2-bank> <sf2-program> <pcm16|pcm8|adpcm|auto>\n"
         "# song <output-basename> <source.mid>\n\n"
         "source default %s\n\n", sf2_path) < 0;

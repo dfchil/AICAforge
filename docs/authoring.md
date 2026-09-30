@@ -54,14 +54,21 @@ an explicit mapping choice when a source needs it:
 build/afx_compile song.mid --sf2 auto GeneralUser.sf2 song.afb song.afx
 ```
 
+The native reader lowers the common SF2 instrument controls offline: volume
+attack/decay/sustain/release, initial attenuation, pan, reverb send, static
+filter and filter-envelope controls, plus the standard velocity-to-level
+curve. They become ordinary AICA setup words and NOTE mix values; neither the
+SH4 nor ARM7 parses SF2 data.
+
 Several songs can share one AFB. An `.afbm` text map declares any number of
-SoundFont sources, routes each MIDI bank/program pair to a source preset, and
+SoundFont sources, optionally selects `stereo`, `left`, or `right` from linked
+stereo samples, routes each MIDI bank/program pair to a source preset, and
 states that mapping's format. This also lets one song combine samples from
 several SoundFonts while runtime still sees exactly one bank:
 
 ```text
 source gm        soundfonts/GeneralUser.sf2
-source orchestra soundfonts/orchestra.sf2
+source orchestra soundfonts/orchestra.sf2 stereo
 map * 0 0  gm        0 0  auto
 map * 0 42 orchestra 0 42 pcm16
 song title_theme midi/title_theme.mid

@@ -10,7 +10,7 @@ enum { AFB_HEADER = AFX_BANK_HEADER_BYTES, AFC_HEADER = AFX_SEEK_HEADER_BYTES,
        AFX_HEADER = 80, RELOCATION_BYTES = 12,
        SINE_FRAMES = 128, VISUAL_HEADER = 12, VISUAL_BANDS = 32, VISUAL_RATE = 60 };
 
-typedef struct { uint32_t tick; uint8_t kind, channel, key, velocity; uint16_t setup; } event_t;
+typedef struct { uint32_t tick; uint8_t kind, channel, key, velocity; uint16_t setup, mix; } event_t;
 
 static uint32_t hash32(const uint8_t *p, uint32_t bytes) {
     uint32_t h = 2166136261u;
@@ -201,8 +201,9 @@ int afx_c_compile_zones(const afx_c_note_t *input, uint32_t count,
         while (channel < channels && ends[channel] > notes[i].start_tick) ++channel;
         if (channel == channels) { if (channels == 64) goto failed; ++channels; }
         ends[channel] = notes[i].end_tick;
-        events[2 * i] = (event_t){notes[i].start_tick, 1, (uint8_t)channel, notes[i].key, notes[i].velocity, (uint16_t)setup};
-        events[2 * i + 1] = (event_t){notes[i].end_tick, 0, (uint8_t)channel, 0, 0, 0};
+        events[2 * i] = (event_t){notes[i].start_tick, 1, (uint8_t)channel, notes[i].key, notes[i].velocity,
+                                  (uint16_t)setup, notes[i].mix};
+        events[2 * i + 1] = (event_t){notes[i].end_tick, 0, (uint8_t)channel, 0, 0, 0, 0};
     }
     qsort(events, 2u * count, sizeof(*events), compare_event);
     uint32_t cursor = 0, previous = 0;
@@ -214,7 +215,7 @@ int afx_c_compile_zones(const afx_c_note_t *input, uint32_t count,
             afx_write16(stream + cursor, events[i].setup); cursor += 2;
             afx_write16(stream + cursor, pitch(events[i].key, zones[events[i].setup].sample.root_key,
                                                 zones[events[i].setup].sample.tuning_cents)); cursor += 2;
-            afx_write16(stream + cursor, level(events[i].velocity)); cursor += 2;
+            afx_write16(stream + cursor, events[i].mix ? events[i].mix : level(events[i].velocity)); cursor += 2;
         }
     }
     stream[cursor++] = AFX_OP_END;
@@ -267,6 +268,8 @@ sample_known:;
         /* DISDL must be nonzero: 0x0010 has centre pan but mutes direct audio. */
         afx_write16(state + 18, 0x0f10); afx_write16(state + 20, 0x0024);
         for (uint32_t field = 11; field < 16; ++field) afx_write16(state + 2 * field, 0x1fffu);
+        for (uint32_t field = 4; field < AFX_FIELD_COUNT; ++field)
+            if (zones[i].setup_mask & (1u << field)) afx_write16(state + 2 * field, zones[i].setup[field]);
         uint8_t *relocation = afx + AFX_HEADER + i * RELOCATION_BYTES;
         afx_write32(relocation, i * AFX_SETUP_BYTES); afx_write32(relocation + 4, offsets[i]);
         afx_write32(relocation + 8, zones[i].sample.bytes);
@@ -290,7 +293,7 @@ int afx_c_compile_sample(const afx_c_note_t *notes, uint32_t count,
                          uint32_t tick_rate, const afx_c_sample_t *sample,
                          afx_c_output_t *out) {
     if (!sample) return -1;
-    const afx_c_zone_t zone = {*sample, 0, 127, 0, 127, 0, 0, 0, 0};
+    const afx_c_zone_t zone = {.sample = *sample, .key_max = 127, .velocity_max = 127};
     return afx_c_compile_zones(notes, count, tick_rate, &zone, 1, out);
 }
 

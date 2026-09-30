@@ -44,7 +44,7 @@ failed:
 static int wilhelm_pair(const char *pcm_path, const char *afb, const char *afx) {
     uint8_t *pcm; uint32_t bytes;
     if (read_file(pcm_path, &pcm, &bytes)) return -1;
-    const afx_c_note_t note = {1000, 3000, 69, 127, 0, 0, 0, 0};
+    const afx_c_note_t note = {1000, 3000, 69, 127, 0, 0, 0, 0, 0};
     const afx_c_sample_t sample = {pcm, bytes, bytes / 2u, AFX_PCM16, 69, 0,
                                    0, (uint16_t)(bytes / 2u - 1u), 1200, 44100};
     afx_c_output_t out;
@@ -55,25 +55,25 @@ static int wilhelm_pair(const char *pcm_path, const char *afb, const char *afx) 
 
 int main(int argc, char **argv) {
     if (argc == 4 && !strcmp(argv[1], "quickstart")) {
-        const afx_c_note_t notes[] = {{0, 4320, 69, 100, 0, 0, 0, 0},
-                                      {4800, 5280, 81, 100, 0, 0, 0, 0},
-                                      {7680, 8160, 84, 100, 0, 0, 0, 0}};
+        const afx_c_note_t notes[] = {{0, 4320, 69, 100, 0, 0, 0, 0, 0},
+                                      {4800, 5280, 81, 100, 0, 0, 0, 0, 0},
+                                      {7680, 8160, 84, 100, 0, 0, 0, 0, 0}};
         return sine_pair(notes, 3, argv[2], argv[3]) ? 1 : 0;
     }
     if (argc == 4 && !strcmp(argv[1], "dsp-demo")) {
-        const afx_c_note_t notes[] = {{500, 688, 72, 110, 0, 0, 0, 0},
-                                      {1000, 1188, 76, 110, 0, 0, 0, 0},
-                                      {1500, 1688, 79, 110, 0, 0, 0, 0},
-                                      {2000, 2188, 84, 110, 0, 0, 0, 0}};
+        const afx_c_note_t notes[] = {{500, 688, 72, 110, 0, 0, 0, 0, 0},
+                                      {1000, 1188, 76, 110, 0, 0, 0, 0, 0},
+                                      {1500, 1688, 79, 110, 0, 0, 0, 0, 0},
+                                      {2000, 2188, 84, 110, 0, 0, 0, 0, 0}};
         return sine_pair(notes, 4, argv[2], argv[3]) ? 1 : 0;
     }
     if (argc == 4 && !strcmp(argv[1], "dsp-effects")) {
-        const afx_c_note_t phrase[] = {{0, 375, 72, 110, 0, 0, 0, 0},
-                                       {375, 750, 76, 110, 0, 0, 0, 0},
-                                       {750, 1125, 79, 110, 0, 0, 0, 0},
-                                       {1125, 1500, 84, 110, 0, 0, 0, 0}};
-        const afx_c_note_t impulse[] = {{0, 375, 96, 110, 0, 0, 0, 0}};
-        const afx_c_note_t tone[] = {{0, 750, 69, 110, 0, 0, 0, 0}};
+        const afx_c_note_t phrase[] = {{0, 375, 72, 110, 0, 0, 0, 0, 0},
+                                       {375, 750, 76, 110, 0, 0, 0, 0, 0},
+                                       {750, 1125, 79, 110, 0, 0, 0, 0, 0},
+                                       {1125, 1500, 84, 110, 0, 0, 0, 0, 0}};
+        const afx_c_note_t impulse[] = {{0, 375, 96, 110, 0, 0, 0, 0, 0}};
+        const afx_c_note_t tone[] = {{0, 750, 69, 110, 0, 0, 0, 0, 0}};
         char afb[4096], afx[4096];
 #define PAIR(name, notes) do { \
         if (snprintf(afb, sizeof(afb), "%s/" name ".afb", argv[2]) >= (int)sizeof(afb) || \
