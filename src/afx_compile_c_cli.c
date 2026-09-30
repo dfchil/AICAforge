@@ -87,7 +87,7 @@ static int load_zones(const char *path, afx_c_zone_t **out_zones, uint8_t ***out
             sample.loop = 1; sample.loop_start = (uint16_t)loop_start; sample.loop_end = (uint16_t)loop_end;
         }
         zones[count] = (afx_c_zone_t){sample, (uint8_t)key_min, (uint8_t)key_max,
-                                      0, 127, 0, 0, 0};
+                                      0, 127, 0, 0, 0, 0};
         owned[count++] = encoded;
     }
     fclose(file);
@@ -99,15 +99,25 @@ failed:
 
 int main(int argc, char **argv) {
     if (argc == 4 && !strcmp(argv[1], "--summary")) {
-        uint32_t afb_bytes = 0, afx_bytes = 0;
+        uint32_t afb_bytes = 0, afx_bytes = 0, notes = 0;
+        afx_file_header_t header;
         uint8_t *afb = read_file(argv[2], &afb_bytes), *afx = read_file(argv[3], &afx_bytes);
         if (!afb || !afx || afb_bytes < AFX_BANK_HEADER_BYTES || afx_bytes < AFX_FILE_HEADER_BYTES ||
-            afx_read32(afb) != AFX_BANK_MAGIC || afx_read32(afx) != AFX_FILE_MAGIC) {
+            afx_read32(afb) != AFX_BANK_MAGIC || afx_file_validate(afx, afx_bytes, &header)) {
             free(afb); free(afx); return fprintf(stderr, "cannot summarize AFB/AFX pair\n"), 2;
         }
-        printf("%u %u %u %u %u %u\n", afb_bytes + afx_bytes,
+        const uint8_t *image = afx + header.image_offset;
+        for (uint32_t offset = header.stream_offset, end = header.stream_offset + header.stream_size; offset < end;) {
+            afx_event_t event;
+            if (afx_decode_event(image + offset, end - offset, &event)) {
+                free(afb); free(afx); return fprintf(stderr, "cannot summarize AFB/AFX pair\n"), 2;
+            }
+            if (event.opcode == AFX_OP_NOTE) ++notes;
+            offset += event.bytes;
+        }
+        printf("%u %u %u %u %u %u %u\n", afb_bytes + afx_bytes,
                afb_bytes - AFX_BANK_HEADER_BYTES, afx_read32(afx + 28),
-               afx_read32(afx + 24), afx_read32(afx + 52), afx_read32(afx + 64));
+               afx_read32(afx + 24), notes, afx_read32(afx + 52), afx_read32(afx + 64));
         free(afb); free(afx); return 0;
     }
     int zones_mode = argc == 6 && !strcmp(argv[2], "--zones");
@@ -144,7 +154,7 @@ int main(int argc, char **argv) {
     free_zones(zones, owned, zone_count);
     afx_c_sf2_output_free(&sf2);
     if (result) return fprintf(stderr, "cannot compile source\n"), 1;
-    if (out.afb_bytes < AFX_BANK_HEADER_BYTES || out.afb_bytes - AFX_BANK_HEADER_BYTES > AFX_ASSET_LIMIT) {
+    if (out.afb_bytes < AFX_BANK_HEADER_BYTES || out.afb_bytes - AFX_BANK_HEADER_BYTES > AFX_ASSET_MAX) {
         afx_c_output_free(&out);
         return fprintf(stderr, "AFB payload exceeds the AICA asset arena\n"), 1;
     }

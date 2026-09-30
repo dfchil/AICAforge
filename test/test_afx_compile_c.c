@@ -39,8 +39,8 @@ int main(void) {
     const afx_c_note_t split_notes[] = {{0, 100, 60, 100, 0, 0, 0, 0},
                                         {100, 200, 72, 100, 0, 0, 0, 0}};
     const afx_c_zone_t zones[] = {
-        {{pcm, sizeof(pcm), 4, AFX_PCM16, 60, 0, 0, 3, 0}, 0, 65, 0, 127, 0, 0, 0},
-        {{pcm, sizeof(pcm), 4, AFX_PCM16, 72, 1, 0, 3, 0}, 66, 127, 0, 127, 0, 0, 0},
+        {{pcm, sizeof(pcm), 4, AFX_PCM16, 60, 0, 0, 3, 0}, 0, 65, 0, 127, 0, 0, 0, 0},
+        {{pcm, sizeof(pcm), 4, AFX_PCM16, 72, 1, 0, 3, 0}, 66, 127, 0, 127, 0, 0, 0, 0},
     };
     assert(!afx_c_compile_zones(split_notes, 2, 1000, zones, 2, &out));
     assert(afx_file_validate(out.afx, out.afx_bytes, NULL) == AFX_OK);

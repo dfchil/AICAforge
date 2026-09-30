@@ -149,8 +149,9 @@ static int parse_map(const char *path, source_t **out_sources, uint32_t *out_sou
             sources = grown; sources[source_count++] = item;
         } else if (!strcmp(kind, "map")) {
             unsigned midi_bank, midi_program, sf2_bank, sf2_program; map_t item = {0};
-            if (sscanf(cursor, "%15s %127s %u %u %127s %u %u %15s", kind, item.song, &midi_bank,
-                       &midi_program, c, &sf2_bank, &sf2_program, f) != 8 || midi_bank > 16383 || midi_program > 127 ||
+            int fields = sscanf(cursor, "%15s %127s %u %u %127s %u %u %15s", kind, item.song, &midi_bank,
+                                &midi_program, c, &sf2_bank, &sf2_program, f);
+            if (fields != 8 || midi_bank > 16383 || midi_program > 127 ||
                 song_count || sf2_bank > 16383 || sf2_program > 127 || afx_c_parse_sample_format(f, &item.format) ||
                 !(item.source = find_source(sources, source_count, c))) goto failed;
             for (uint32_t i = 0; i < map_count; ++i)
@@ -200,9 +201,9 @@ static int resolve_song(song_t *song, map_t *maps, uint32_t map_count) {
             selected[at].bank_lsb = maps[map_index].sf2_bank % 128u; selected[at++].program = maps[map_index].sf2_program;
         }
         afx_c_sf2_output_t resolved = {0};
-        int failed_resolve = afx_c_sf2_resolve(maps[map_index].source->path, selected, matching,
-                                               maps[map_index].format, &resolved) ||
-                             append_resolved(&song->resolved, &resolved);
+        int resolve_result = afx_c_sf2_resolve(maps[map_index].source->path, selected, matching,
+                                               maps[map_index].format, &resolved);
+        int failed_resolve = resolve_result || append_resolved(&song->resolved, &resolved);
         free(selected); afx_c_sf2_output_free(&resolved);
         if (failed_resolve) goto failed;
     }
@@ -261,12 +262,38 @@ static int create_map(int argc, char **argv) {
     free(programs); return failed ? -1 : 0;
 }
 
+static int build_per_song(const char *map_path, const char *directory) {
+    source_t *sources = NULL; map_t *maps = NULL; song_t *songs = NULL;
+    uint32_t source_count = 0, map_count = 0, song_count = 0;
+    if (parse_map(map_path, &sources, &source_count, &maps, &map_count, &songs, &song_count)) goto failed;
+    for (uint32_t song = 0; song < song_count; ++song) {
+        afx_c_output_t out = {0};
+        char afb[4096], afx[4096], afc[4096], afv[4096];
+        if (resolve_song(songs + song, maps, map_count) ||
+            afx_c_compile_zones(songs[song].resolved.notes, songs[song].resolved.note_count, 1000,
+                                songs[song].resolved.zones, songs[song].resolved.zone_count, &out)) goto failed;
+        if (out.afb_bytes < AFX_BANK_HEADER_BYTES || out.afb_bytes - AFX_BANK_HEADER_BYTES > AFX_ASSET_MAX ||
+            snprintf(afb, sizeof(afb), "%s/%s.afb", directory, songs[song].name) >= (int)sizeof(afb) ||
+            flow_paths(directory, songs[song].name, afx, afc, afv) ||
+            write_file(afb, out.afb, out.afb_bytes) || write_file(afx, out.afx, out.afx_bytes) ||
+            write_file(afc, out.afc, out.afc_bytes) || write_file(afv, out.afv, out.afv_bytes)) {
+            afx_c_output_free(&out); goto failed;
+        }
+        afx_c_output_free(&out);
+    }
+    free(sources); free(maps); free_songs(songs, song_count); return 0;
+failed:
+    free(sources); free(maps); free_songs(songs, song_count);
+    fprintf(stderr, "cannot build per-song banks from %s\n", map_path); return 1;
+}
+
 int main(int argc, char **argv) {
     if (argc >= 2 && !strcmp(argv[1], "--create-map")) {
         if (create_map(argc, argv))
             return fprintf(stderr, "usage: %s --create-map library.afbm bank.sf2 name song.mid [name song.mid ...]\n", argv[0]), 2;
         return 0;
     }
+    if (argc == 4 && !strcmp(argv[1], "--per-song")) return build_per_song(argv[2], argv[3]);
     if (argc != 4) return fprintf(stderr, "usage: %s library.afbm output-dir bank.afb\n", argv[0]), 2;
     source_t *sources = NULL; map_t *maps = NULL; song_t *songs = NULL;
     uint32_t source_count = 0, map_count = 0, song_count = 0, zone_count = 0;
@@ -293,7 +320,7 @@ int main(int argc, char **argv) {
         afx_c_output_t out;
         if (afx_c_compile_zones(songs[song].resolved.notes, songs[song].resolved.note_count, 1000,
                                 zones, zone_count, &out)) goto failed;
-        if (out.afb_bytes < AFX_BANK_HEADER_BYTES || out.afb_bytes - AFX_BANK_HEADER_BYTES > AFX_ASSET_LIMIT) {
+        if (out.afb_bytes < AFX_BANK_HEADER_BYTES || out.afb_bytes - AFX_BANK_HEADER_BYTES > AFX_ASSET_MAX) {
             afx_c_output_free(&out); goto failed;
         }
         if (!song) {

@@ -37,6 +37,8 @@ typedef struct {
     afx_c_sample_t sample;
     uint8_t key_min, key_max, velocity_min, velocity_max;
     uint8_t bank_msb, bank_lsb, program;
+    /* AICA DSP-send register byte: IMXL in the high nibble, ISEL in low. */
+    uint8_t dsp_send;
 } afx_c_zone_t;
 
 /* Every note must select exactly one key range. The zones become the AFB's

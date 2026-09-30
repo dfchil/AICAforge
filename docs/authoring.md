@@ -6,9 +6,9 @@ matching AFC seek and AFV visualizer sidecars beside the AFX.
 
 Mappings select source samples and their explicit AICA sample coding
 (`pcm16`, `pcm8`, `adpcm`, or `auto`). A `.afp` performance profile is an offline-only description of
-register-level changes: it produces a new AFX but never changes NOTE or KEYOFF
-timing. Use the music source for timing and use `.afp` for timbre and
-articulation.
+register-level changes and DSP use: it produces a new AFX but never changes NOTE or KEYOFF
+timing. Use the music source for timing and use `.afp` for timbre,
+articulation and room treatment.
 
 `make compiler` builds the host tool. It reads the note and tempo subset of a
 Standard MIDI file and emits strict AFB/AFX/AFC/AFV assets. For example:
@@ -73,6 +73,28 @@ build/afx_bank_c library.afbm output music.afb
 The result is one `music.afb`, plus `title_theme.afx/.afc/.afv` and
 `field_theme.afx/.afc/.afv`. AFX remains sample-free; every flow is bound to
 the generated bank identity at load time.
+
+## Performance profiles
+
+`build/afx_profile_c init` creates an editable JSON `.afp` file from an
+already-built AFX. It binds the sidecar to that exact base with SHA-256 and
+lists every NOTE event by its stable `{tick, ordinal, channel}` identity. The
+initial `all-notes` template makes the common case visible before an editor
+splits it into named tone templates.
+
+```sh
+build/afx_profile_c init song.afx song.afp room 112
+# edit song.afp offline
+build/afx_profile_c apply song.afx song.afc song.afp song-performance.afx song-performance.afc
+```
+
+The current C applier implements the shared DSP scene and send in the `dsp`
+section (`dry`, `room`, `room_warm`, or `room_large`). It writes those sends
+into the derived AFX, updates its control identity and rewrites the matching
+AFC header. The generated tone inventory is the stable input for the targeted
+template rewrite; no profile is interpreted by SH4 or ARM7. An old profile
+intentionally fails after its AFX source changes rather than silently applying
+to a different set of notes.
 
 To create a map instead of writing the initial MIDI-program mapping by hand:
 

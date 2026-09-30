@@ -233,7 +233,7 @@ static int append_note(resolver_t *resolver, const controls_t *controls) {
         resolver->out->zones[zone] = (afx_c_zone_t){sample, 0, 127, 0, 127,
                                                      resolver->source->bank_msb,
                                                      resolver->source->bank_lsb,
-                                                     resolver->source->program};
+                                                     resolver->source->program, 0};
         ++resolver->out->zone_count;
     }
     afx_c_note_t *grown = realloc(resolver->out->notes,
