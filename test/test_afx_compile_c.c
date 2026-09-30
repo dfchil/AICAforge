@@ -3,12 +3,18 @@
 #include <aicaflow/codec.h>
 #include <assert.h>
 #include <stdlib.h>
+#include <string.h>
 
 int main(void) {
     const afx_c_note_t notes[] = {{0, 500, 69, 120}, {250, 750, 76, 100}};
     afx_c_output_t out;
     assert(!afx_c_compile_sine(notes, 2, 1000, &out));
     assert(afx_file_validate(out.afx, out.afx_bytes, NULL) == AFX_OK);
+    afx_c_output_t repeat;
+    assert(!afx_c_compile_sine(notes, 2, 1000, &repeat));
+    assert(out.afb_bytes == repeat.afb_bytes && !memcmp(out.afb, repeat.afb, out.afb_bytes));
+    assert(out.afx_bytes == repeat.afx_bytes && !memcmp(out.afx, repeat.afx, out.afx_bytes));
+    afx_c_output_free(&repeat);
     afx_c_output_free(&out);
     const unsigned char midi[] = {
         'M','T','h','d', 0,0,0,6, 0,0, 0,1, 1,224,

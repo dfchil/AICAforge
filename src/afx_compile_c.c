@@ -24,13 +24,17 @@ static uint32_t hash32_alt(const uint8_t *p, uint32_t bytes) {
 
 static int compare_note(const void *left, const void *right) {
     const afx_c_note_t *a = left, *b = right;
-    return a->start_tick < b->start_tick ? -1 : a->start_tick > b->start_tick;
+    if (a->start_tick != b->start_tick) return a->start_tick < b->start_tick ? -1 : 1;
+    if (a->end_tick != b->end_tick) return a->end_tick < b->end_tick ? -1 : 1;
+    if (a->key != b->key) return a->key < b->key ? -1 : 1;
+    return a->velocity < b->velocity ? -1 : a->velocity > b->velocity;
 }
 
 static int compare_event(const void *left, const void *right) {
     const event_t *a = left, *b = right;
     if (a->tick != b->tick) return a->tick < b->tick ? -1 : 1;
-    return (int)a->kind - (int)b->kind; /* KEYOFF before NOTE on a shared tick. */
+    if (a->kind != b->kind) return (int)a->kind - (int)b->kind; /* KEYOFF first. */
+    return (int)a->channel - (int)b->channel;
 }
 
 static uint16_t pitch(uint8_t key) {
