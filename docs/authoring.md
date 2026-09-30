@@ -21,7 +21,14 @@ For example:
 ```sh
 make compiler
 build/afx_compile_c song.mid song.afb song.afx
+# Or use one raw, little-endian PCM16 source (root key 69):
+build/afx_compile_c song.mid instrument.pcm song.afb song.afx
 ```
+
+The current PCM input is raw little-endian PCM16 at AICA's 44.1 kHz playback
+rate and uses MIDI key 69 as its root. It is intentionally a one-shot source;
+explicit looping, resampling, multiple zones and register-level articulation
+remain the next C authoring layer.
 
 The initial C reader intentionally accepts only the timing and note subset
 (including running status, tempo, note-off and all-notes-off). It deliberately

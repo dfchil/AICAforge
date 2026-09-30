@@ -16,6 +16,12 @@ int main(void) {
     assert(out.afx_bytes == repeat.afx_bytes && !memcmp(out.afx, repeat.afx, out.afx_bytes));
     afx_c_output_free(&repeat);
     afx_c_output_free(&out);
+    const uint8_t pcm[] = {0, 0, 0xff, 0x7f, 0, 0, 0, 0x80};
+    const afx_c_pcm16_t one_shot = {pcm, 4, 60, 0, 0, 3};
+    assert(!afx_c_compile_pcm16(notes, 2, 1000, &one_shot, &out));
+    assert(afx_file_validate(out.afx, out.afx_bytes, NULL) == AFX_OK);
+    assert(out.afb_bytes == 32 + sizeof(pcm) && !memcmp(out.afb + 32, pcm, sizeof(pcm)));
+    afx_c_output_free(&out);
     const unsigned char midi[] = {
         'M','T','h','d', 0,0,0,6, 0,0, 0,1, 1,224,
         'M','T','r','k', 0,0,0,20,

@@ -37,8 +37,8 @@ static int compare_event(const void *left, const void *right) {
     return (int)a->channel - (int)b->channel;
 }
 
-static uint16_t pitch(uint8_t key) {
-    double ratio = pow(2.0, ((int)key - 69) / 12.0);
+static uint16_t pitch(uint8_t key, uint8_t root_key) {
+    double ratio = pow(2.0, ((int)key - root_key) / 12.0);
     int octave = (int)floor(log2(ratio));
     int fraction = (int)(1024.0 * (ratio / pow(2.0, octave) - 1.0));
     if (octave < -8) octave = -8;
@@ -65,9 +65,12 @@ void afx_c_output_free(afx_c_output_t *out) {
     free(out->afb); free(out->afx); *out = (afx_c_output_t){0};
 }
 
-int afx_c_compile_sine(const afx_c_note_t *input, uint32_t count,
-                       uint32_t tick_rate, afx_c_output_t *out) {
-    if (!out || !input || !count || !tick_rate) return -1;
+int afx_c_compile_pcm16(const afx_c_note_t *input, uint32_t count,
+                        uint32_t tick_rate, const afx_c_pcm16_t *sample,
+                        afx_c_output_t *out) {
+    if (!out || !input || !count || !tick_rate || !sample || !sample->pcm16 ||
+        !sample->frames || sample->frames > 65535 ||
+        sample->loop_start > sample->loop_end || sample->loop_end >= sample->frames) return -1;
     *out = (afx_c_output_t){0};
     afx_c_note_t *notes = malloc(count * sizeof(*notes));
     event_t *events = malloc(2u * count * sizeof(*events));
@@ -93,19 +96,16 @@ int afx_c_compile_sine(const afx_c_note_t *input, uint32_t count,
         else {
             stream[cursor++] = AFX_OP_NOTE_PL; stream[cursor++] = events[i].channel;
             afx_write16(stream + cursor, 0); cursor += 2;
-            afx_write16(stream + cursor, pitch(events[i].key)); cursor += 2;
+            afx_write16(stream + cursor, pitch(events[i].key, sample->root_key)); cursor += 2;
             afx_write16(stream + cursor, level(events[i].velocity)); cursor += 2;
         }
     }
     stream[cursor++] = AFX_OP_END;
-    const uint32_t sample_bytes = SINE_FRAMES * 2u;
+    const uint32_t sample_bytes = sample->frames * 2u;
     out->afb_bytes = AFB_HEADER + sample_bytes;
     out->afb = calloc(1, out->afb_bytes);
     if (!out->afb) goto failed;
-    for (uint32_t i = 0; i < SINE_FRAMES; ++i) {
-        int16_t value = (int16_t)(sin(6.28318530717958647692 * i / SINE_FRAMES) * 28000.0);
-        afx_write16(out->afb + AFB_HEADER + 2 * i, (uint16_t)value);
-    }
+    memcpy(out->afb + AFB_HEADER, sample->pcm16, sample_bytes);
     uint32_t bank_id = hash32(out->afb + AFB_HEADER, sample_bytes);
     afx_write32(out->afb, 0x00424641u); afx_write32(out->afb + 4, 1);
     afx_write32(out->afb + 8, bank_id); afx_write32(out->afb + 12, hash32_alt(out->afb + AFB_HEADER, sample_bytes));
@@ -116,8 +116,9 @@ int afx_c_compile_sine(const afx_c_note_t *input, uint32_t count,
     out->afx = calloc(1, out->afx_bytes);
     if (!out->afx) goto failed;
     uint8_t *afx = out->afx, *setup = afx + image_at;
-    afx_write16(setup, 0x0200); afx_write16(setup + 2, 0);
-    afx_write16(setup + 6, SINE_FRAMES); afx_write16(setup + 8, 0x001f); afx_write16(setup + 10, 0x001f);
+    afx_write16(setup, sample->loop ? 0x0200 : 0); afx_write16(setup + 2, 0);
+    afx_write16(setup + 4, sample->loop_start); afx_write16(setup + 6, sample->loop_end);
+    afx_write16(setup + 8, 0x001f); afx_write16(setup + 10, 0x001f);
     afx_write16(setup + 18, 0x0010); afx_write16(setup + 20, 0x0024);
     for (uint32_t i = 11; i < 16; ++i) afx_write16(setup + 2 * i, 0x1fffu);
     memcpy(setup + AFX_SETUP_BYTES, stream, cursor);
@@ -132,4 +133,15 @@ int afx_c_compile_sine(const afx_c_note_t *input, uint32_t count,
     free(notes); free(events); free(stream); return 0;
 failed:
     free(notes); free(events); free(stream); afx_c_output_free(out); return -1;
+}
+
+int afx_c_compile_sine(const afx_c_note_t *notes, uint32_t count,
+                       uint32_t tick_rate, afx_c_output_t *out) {
+    uint8_t pcm[SINE_FRAMES * 2];
+    for (uint32_t i = 0; i < SINE_FRAMES; ++i) {
+        int16_t value = (int16_t)(sin(6.28318530717958647692 * i / SINE_FRAMES) * 28000.0);
+        afx_write16(pcm + 2 * i, (uint16_t)value);
+    }
+    const afx_c_pcm16_t sample = {pcm, SINE_FRAMES, 69, 1, 0, SINE_FRAMES - 1};
+    return afx_c_compile_pcm16(notes, count, tick_rate, &sample, out);
 }
