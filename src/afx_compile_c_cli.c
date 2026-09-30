@@ -82,7 +82,7 @@ static int load_zones(const char *path, afx_c_zone_t **out_zones, uint8_t ***out
         }
         free(pcm);
         afx_c_sample_t sample = {encoded, encoded_bytes, pcm_bytes / 2, format, (uint8_t)root,
-                                 0, 0, (uint16_t)(pcm_bytes / 2 - 1), 0};
+                                 0, 0, (uint16_t)(pcm_bytes / 2 - 1), 0, 44100};
         if (looping) {
             sample.loop = 1; sample.loop_start = (uint16_t)loop_start; sample.loop_end = (uint16_t)loop_end;
         }
@@ -136,7 +136,7 @@ int main(int argc, char **argv) {
     uint8_t *pcm = NULL; uint32_t pcm_bytes = 0;
     if (!parsed && argc == 5) pcm = read_file(argv[2], &pcm_bytes);
     afx_c_sample_t sample = {pcm, pcm_bytes, pcm_bytes / 2, AFX_PCM16, 69,
-                             0, 0, pcm_bytes / 2 ? pcm_bytes / 2 - 1 : 0, 0};
+                             0, 0, pcm_bytes / 2 ? pcm_bytes / 2 - 1 : 0, 0, 44100};
     afx_c_zone_t *zones = NULL; uint8_t **owned = NULL; uint32_t zone_count = 0;
     afx_c_sf2_output_t sf2 = {0};
     if (!parsed && zones_mode && load_zones(argv[3], &zones, &owned, &zone_count)) parsed = -1;
@@ -147,7 +147,7 @@ int main(int argc, char **argv) {
                  sf2_mode ? afx_c_compile_zones(sf2.notes, sf2.note_count, 1000,
                                                  sf2.zones, sf2.zone_count, &out) :
                  zones_mode ? afx_c_compile_zones(notes, count, 1000, zones, zone_count, &out) :
-                 argc == 5 ? afx_c_compile_pcm16(notes, count, 1000, &sample, &out) :
+                 argc == 5 ? afx_c_compile_sample(notes, count, 1000, &sample, &out) :
                  afx_c_compile_sine(notes, count, 1000, &out);
     free(notes);
     free(pcm);

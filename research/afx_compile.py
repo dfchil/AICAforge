@@ -672,7 +672,7 @@ def aica_envelope(controls: dict, mode: str, config: dict | None = None) -> tupl
     sustain = controls["sustain_centibels"]
     dl = dl_override if dl_override is not None else \
          (0 if sustain is None else max(0, min(31, round(sustain * 31 / 1440))) )
-    if dl_override is None and sustain is not None and config.get("gain_model") == "fluidsynth_2":
+    if dl_override is None and sustain is not None:
         # DL advances eight TL steps: one half-amplitude (3.0103 dB) each.
         dl = max(0, min(31, round(sustain / (100 * math.log10(2)))))
     return ar | d1r << 6 | d2r << 11, rr | dl << 5 | krs << 10
@@ -794,15 +794,7 @@ def aica_direct(config: dict, controls: dict | None = None, channel_pan: int = 6
     if not isinstance(channel_pan, int) or not 0 <= channel_pan <= 127:
         raise CompileError("MIDI channel pan must be in 0..127")
     if source_pan == "apply":
-        if config.get("gain_model") == "fluidsynth_2" and config.get("pan_model", "sf2") == "sf2":
-            return q << 8 | sf2_pan(controls, channel_pan)[0]
-        source_steps = 0 if controls is None or controls.get("pan_centibels") is None else \
-            round(controls["pan_centibels"] / 300)
-        controller_steps = round((channel_pan - 64) * 15 / 63)
-        if source_steps or controller_steps:
-            steps = min(15, max(-15, source_steps + controller_steps))
-            # SF2 positive means right. AICA 0x01..0x0f attenuate left; 0x11..0x1f right.
-            value = (value & ~0x1f) | (steps if steps >= 0 else (0x10 | -steps))
+        return q << 8 | sf2_pan(controls, channel_pan)[0]
     return q << 8 | value & 0x1f
 
 
@@ -880,7 +872,7 @@ def record_total_level(note: dict, record: dict, controller: dict | None = None,
     attenuation = source + velocity + attenuation_delta_centibels + record.get("controller_gain_scale", 1) * midi_controller_attenuation_centibels(
                             note if controller is None else controller)
     config = record.get("direct_config", {})
-    if config.get("gain_model") == "fluidsynth_2" and config.get("pan_model", "sf2") == "sf2" and config.get("source_pan", "apply") == "apply":
+    if config.get("source_pan", "apply") == "apply":
         attenuation += sf2_pan(controls, (note if controller is None else controller).get("channel_pan", 64))[1]
     return aica_total_level(attenuation * record.get("tl_gain_scale", 1), record_lpf(note, record, controller))
 
@@ -996,8 +988,7 @@ def timed_controller_patches(timeline: dict, records: list[dict], tick_rate: int
                 fields[AFX_FIELD_TOTAL_LEVEL] = record_total_level(note, record, controller)
             if controller.get("control") == 10:
                 fields[AFX_FIELD_DIRECT] = record_direct(record, controller)
-                if record.get("direct_config", {}).get("gain_model") == "fluidsynth_2":
-                    fields[AFX_FIELD_TOTAL_LEVEL] = record_total_level(note, record, controller)
+                fields[AFX_FIELD_TOTAL_LEVEL] = record_total_level(note, record, controller)
             if controller.get("control") == 91 and record.get("midi_reverb") == "apply":
                 fields[AFX_FIELD_DSP_SEND] = record_dsp_send(note, record, controller)
             if controller.get("control") == 93 and record.get("midi_chorus") == "apply":
@@ -1145,11 +1136,8 @@ def _sf2_records(timeline: dict, mapping: dict) -> list[dict]:
                 raise CompileError(f"SoundFont preset {preset_id} missing; available: {available or 'none'}")
             converted = {}
             for index, note, config in group["entries"]:
-                gain_model = config.get("gain_model", "legacy")
-                if gain_model not in ("legacy", "fluidsynth_2"):
-                    raise CompileError("gain_model must be legacy or fluidsynth_2")
-                if config.get("pan_model", "sf2") not in ("sf2", "legacy"):
-                    raise CompileError("pan_model must be sf2 or legacy")
+                if "gain_model" in config or "pan_model" in config:
+                    raise CompileError("gain_model and pan_model were removed; AICAflow uses the fixed SF2 model")
                 filter_level = config.get("filter_level", 0x1fff)
                 if not isinstance(filter_level, int) or not 0 <= filter_level <= 0x1fff:
                     raise CompileError("filter_level must be an AICA cutoff level in 0..8191")
@@ -1232,8 +1220,7 @@ def _sf2_records(timeline: dict, mapping: dict) -> list[dict]:
                                   "filter_levels": tuple(filter_levels), "filter_env_ad": filter_env_ad, "filter_env_dr": filter_env_dr,
                                   "base_attenuation": (float(config.get("attenuation_centibels", 0)) +
                                                        sample_attenuation_centibels(config, sample) +
-                                                       (use["source_controls"]["attenuation_centibels"] or 0) *
-                                                       (4 if gain_model == "fluidsynth_2" else 1)),
+                                                       (use["source_controls"]["attenuation_centibels"] or 0) * 4),
                                   "source_reverb_applied": config.get("source_reverb", "ignore") == "apply",
                                   "release_rate_overridden": config.get("release_rate") is not None,
                                   "envelope_mode": envelope_mode, "env_ad": env_ad, "env_dr": env_dr,
@@ -1249,16 +1236,13 @@ def _sf2_records(timeline: dict, mapping: dict) -> list[dict]:
                                   "baked_level_curve": baked_level_curve(config),
                                   "name": sample.name}
                 record["dsp_send"] = record_dsp_send(note, record)
-                if gain_model == "fluidsynth_2":
-                    # FluidSynth 2.6: default concave velocity/CC modulators give
-                    # -40 log10(value/127) dB. The historical authoring gain unit
-                    # here is 0.01 dB; source initialAttenuation uses EMU's 0.04 dB.
-                    record["velocity_attenuation"] = (-4000 * math.log10(note["velocity"] / 127) *
-                                                      use["velocity_attenuation_amount"] / 960)
-                    record["controller_gain_scale"] = 2
-                    # Native TL halves amplitude every 16 steps. Preserve the
-                    # legacy 0.4 dB authoring conversion for existing mappings.
-                    record["tl_gain_scale"] = 40 / (2000 * math.log10(2) / 16)
+                # FluidSynth 2.6: default concave velocity/CC modulators give
+                # -40 log10(value/127) dB. Source initialAttenuation uses EMU's
+                # 0.04 dB unit; AICA TL halves amplitude every 16 steps.
+                record["velocity_attenuation"] = (-4000 * math.log10(note["velocity"] / 127) *
+                                                  use["velocity_attenuation_amount"] / 960)
+                record["controller_gain_scale"] = 2
+                record["tl_gain_scale"] = 40 / (2000 * math.log10(2) / 16)
                 record["lfo"] = record_lfo(note, record)
                 record["direct"] = record_direct(record, note)
                 record["total_level"] = record_total_level(note, record)

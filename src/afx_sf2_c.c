@@ -197,7 +197,7 @@ static int ensure_sample(resolver_t *resolver, const controls_t *controls, uint3
         decoded->sample = (afx_c_sample_t){encoded, encoded_bytes, frames, format,
                                            header[40] <= 127 ? header[40] : 60,
                                            0, 0, (uint16_t)(frames - 1u),
-                                           (int16_t)tuning};
+                                           (int16_t)tuning, rate / step};
         decoded->loop_start = (uint16_t)local_start;
         decoded->loop_end = (uint16_t)(loop_capable ? local_end - 1u : 0);
         decoded->loop_capable = loop_capable;
@@ -220,6 +220,17 @@ static int same_zone(const afx_c_zone_t *zone, const afx_c_sample_t *sample) {
            zone->sample.loop_end == sample->loop_end && zone->sample.tuning_cents == sample->tuning_cents;
 }
 
+static void copy_sample_name(char out[AFX_C_SAMPLE_NAME_BYTES], const sf2_t *font,
+                             uint32_t sample_id) {
+    const uint8_t *source = font->shdr + sample_id * SHDR_BYTES;
+    unsigned bytes = 0;
+    for (; bytes + 1u < AFX_C_SAMPLE_NAME_BYTES && source[bytes]; ++bytes)
+        out[bytes] = source[bytes] >= 32 && source[bytes] <= 126 ? (char)source[bytes] : '_';
+    while (bytes && out[bytes - 1u] == ' ') --bytes;
+    out[bytes] = 0;
+    if (!bytes) snprintf(out, AFX_C_SAMPLE_NAME_BYTES, "sample-%u", sample_id);
+}
+
 static int append_note(resolver_t *resolver, const controls_t *controls) {
     afx_c_sample_t sample;
     if (ensure_sample(resolver, controls, (uint32_t)controls->sample, &sample)) return -1;
@@ -230,10 +241,16 @@ static int append_note(resolver_t *resolver, const controls_t *controls) {
         afx_c_zone_t *grown = realloc(resolver->out->zones, (size_t)(zone + 1u) * sizeof(*grown));
         if (!grown) return -1;
         resolver->out->zones = grown;
+        char (*names)[AFX_C_SAMPLE_NAME_BYTES] = realloc(resolver->out->zone_names,
+                                                          (size_t)(zone + 1u) * sizeof(*names));
+        if (!names) return -1;
+        resolver->out->zone_names = names;
         resolver->out->zones[zone] = (afx_c_zone_t){sample, 0, 127, 0, 127,
                                                      resolver->source->bank_msb,
                                                      resolver->source->bank_lsb,
                                                      resolver->source->program, 0};
+        copy_sample_name(resolver->out->zone_names[zone], resolver->font,
+                         (uint32_t)controls->sample);
         ++resolver->out->zone_count;
     }
     afx_c_note_t *grown = realloc(resolver->out->notes,
@@ -288,7 +305,8 @@ static int resolve_preset(resolver_t *resolver, uint32_t index) {
 void afx_c_sf2_output_free(afx_c_sf2_output_t *out) {
     if (!out) return;
     for (uint32_t i = 0; i < out->owned_count; ++i) free(out->owned_samples[i]);
-    free(out->owned_samples); free(out->zones); free(out->notes); *out = (afx_c_sf2_output_t){0};
+    free(out->owned_samples); free(out->zone_names); free(out->zones); free(out->notes);
+    *out = (afx_c_sf2_output_t){0};
 }
 
 int afx_c_sf2_resolve(const char *path, const afx_c_note_t *notes, uint32_t count,

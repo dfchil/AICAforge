@@ -88,7 +88,7 @@ def _read_flow(path: Path, flow_id: int | None = None) -> dict:
        relocations_at + relocation_count * AFX_RELOCATION.size > image_at:
         raise ValueError(f"{path}: invalid AFX relocations")
     if not control_id or reserved0 or reserved1:
-        raise ValueError(f"{path}: AFX embeds deprecated metadata")
+        raise ValueError(f"{path}: invalid AFX identity or reserved fields")
     if setup_count * SETUP_BYTES > image_size or stream_at < setup_count * SETUP_BYTES:
         raise ValueError(f"{path}: invalid AFX setup layout")
     relocations = []

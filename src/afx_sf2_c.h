@@ -3,6 +3,8 @@
 
 #include "afx_compile_c.h"
 
+#define AFX_C_SAMPLE_NAME_BYTES 21u
+
 /* Resolve every MIDI note through the matching SF2 preset/instrument zones.
  * Notes are expanded when a SoundFont deliberately layers regions; the
  * returned notes then carry explicit setup indices, so no runtime SF2 lookup
@@ -11,6 +13,7 @@
 typedef struct {
     afx_c_note_t *notes;
     afx_c_zone_t *zones;
+    char (*zone_names)[AFX_C_SAMPLE_NAME_BYTES];
     uint8_t **owned_samples;
     uint32_t note_count, zone_count, owned_count;
 } afx_c_sf2_output_t;

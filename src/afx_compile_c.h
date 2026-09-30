@@ -31,6 +31,8 @@ typedef struct {
     uint8_t format, root_key, loop;
     uint16_t loop_start, loop_end;
     int16_t tuning_cents;
+    /* Zero means the normal 44.1 kHz AICA base rate. */
+    uint32_t sample_rate;
 } afx_c_sample_t;
 
 typedef struct {
@@ -52,12 +54,6 @@ int afx_c_compile_zones(const afx_c_note_t *notes, uint32_t count,
 int afx_c_compile_sample(const afx_c_note_t *notes, uint32_t count,
                          uint32_t tick_rate, const afx_c_sample_t *sample,
                          afx_c_output_t *out);
-
-/* Compatibility spelling for callers with PCM16 data. New tools should use
- * afx_c_compile_sample so their chosen AICA coding is explicit. */
-int afx_c_compile_pcm16(const afx_c_note_t *notes, uint32_t count,
-                        uint32_t tick_rate, const afx_c_sample_t *sample,
-                        afx_c_output_t *out);
 
 /* Compile a resolved monophonic/polyphonic note timeline using the built-in
  * sine source. The caller owns out through afx_c_output_free(). */

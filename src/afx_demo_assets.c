@@ -46,7 +46,7 @@ static int wilhelm_pair(const char *pcm_path, const char *afb, const char *afx) 
     if (read_file(pcm_path, &pcm, &bytes)) return -1;
     const afx_c_note_t note = {1000, 3000, 69, 127, 0, 0, 0, 0};
     const afx_c_sample_t sample = {pcm, bytes, bytes / 2u, AFX_PCM16, 69, 0,
-                                   0, (uint16_t)(bytes / 2u - 1u), 1200};
+                                   0, (uint16_t)(bytes / 2u - 1u), 1200, 44100};
     afx_c_output_t out;
     int result = afx_c_compile_sample(&note, 1, 1000, &sample, &out);
     free(pcm);

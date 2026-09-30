@@ -108,6 +108,9 @@ static inline afx_result_t afx_apply_setup_fields(uint16_t state[AFX_FIELD_COUNT
 }
 /* Runtime validation accepts only the fixed, bank-bound AFX file layout. */
 afx_result_t afx_file_validate(const void *data, uint32_t size, afx_file_header_t *out);
+/* Stable non-zero identity of an AFX control image. Authors use this after
+ * assembling the image; the runtime only compares the stored value. */
+uint32_t afx_control_id(const void *image, uint32_t size);
 /* Validates an AFX file and totals its WAIT instructions. Outputs are written
  * only on success. */
 afx_result_t afx_flow_duration(const void *data, uint32_t size, uint64_t *out_ticks,

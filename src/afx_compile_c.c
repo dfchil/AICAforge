@@ -239,7 +239,7 @@ sample_known:;
         afx_write32(relocation + 8, zones[i].sample.bytes);
     }
     memcpy(setup + zone_count * AFX_SETUP_BYTES, stream, cursor);
-    uint32_t control_id = hash32(setup, image_bytes);
+    uint32_t control_id = afx_control_id(setup, image_bytes);
     afx_write32(afx, AFX_FILE_MAGIC); afx_write32(afx + 4, AFX_FILE_VERSION); afx_write32(afx + 8, out->afx_bytes);
     afx_write32(afx + 12, AFX_FLAG_MUSIC); afx_write32(afx + 16, image_at); afx_write32(afx + 20, image_bytes);
     afx_write32(afx + 24, zone_count * AFX_SETUP_BYTES); afx_write32(afx + 28, cursor); afx_write32(afx + 32, control_id);
@@ -261,12 +261,6 @@ int afx_c_compile_sample(const afx_c_note_t *notes, uint32_t count,
     return afx_c_compile_zones(notes, count, tick_rate, &zone, 1, out);
 }
 
-int afx_c_compile_pcm16(const afx_c_note_t *notes, uint32_t count,
-                        uint32_t tick_rate, const afx_c_sample_t *sample,
-                        afx_c_output_t *out) {
-    return afx_c_compile_sample(notes, count, tick_rate, sample, out);
-}
-
 int afx_c_compile_sine(const afx_c_note_t *notes, uint32_t count,
                        uint32_t tick_rate, afx_c_output_t *out) {
     uint8_t pcm[SINE_FRAMES * 2];
@@ -275,6 +269,6 @@ int afx_c_compile_sine(const afx_c_note_t *notes, uint32_t count,
         afx_write16(pcm + 2 * i, (uint16_t)value);
     }
     const afx_c_sample_t sample = {pcm, sizeof(pcm), SINE_FRAMES, AFX_PCM16, 69, 1,
-                                   0, SINE_FRAMES - 1, 0};
+                                   0, SINE_FRAMES - 1, 0, 44100};
     return afx_c_compile_sample(notes, count, tick_rate, &sample, out);
 }

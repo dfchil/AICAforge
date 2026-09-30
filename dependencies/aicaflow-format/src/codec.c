@@ -1,6 +1,14 @@
 #include <aicaflow/codec.h>
 #include <string.h>
 
+uint32_t afx_control_id(const void *image, uint32_t size) {
+    const uint8_t *bytes = image;
+    uint32_t hash = 2166136261u;
+    if (!bytes) return 0;
+    for (uint32_t i = 0; i < size; ++i) hash = (hash ^ bytes[i]) * 16777619u;
+    return hash ? hash : 1;
+}
+
 afx_result_t afx_encode_event(uint8_t *out, uint32_t capacity, const afx_event_t *e,
                               const uint16_t *values, uint32_t *written) {
     uint8_t tmp[8 + AFX_SETUP_BYTES] = {0};

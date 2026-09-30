@@ -56,9 +56,9 @@ class MirroredPreset:
 
 
 notes = [{"key": 60, "velocity": 100}]
-assert len(afx_sf2.select_regions(notes, Preset(), "left")) == 1
-assert len(afx_sf2.select_regions(notes, Preset(), "right")) == 1
-assert len(afx_sf2.select_regions(notes, Preset(), "stereo")) == 2
+assert len(afx_sf2.select_region_uses(notes, Preset(), "left")) == 1
+assert len(afx_sf2.select_region_uses(notes, Preset(), "right")) == 1
+assert len(afx_sf2.select_region_uses(notes, Preset(), "stereo")) == 2
 uses = afx_sf2.select_region_uses(notes, Preset(), "left")
 assert next(iter(uses.values()))["roots"] == {49}
 assert next(iter(uses.values()))["tunes"] == {0}

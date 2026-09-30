@@ -160,11 +160,6 @@ def select_region_uses(notes: list[dict], preset, channel: str) -> dict:
     return regions
 
 
-def select_regions(notes: list[dict], preset, channel: str) -> list:
-    """Compatibility helper for selection-policy callers."""
-    return [region["sample"] for region in select_region_uses(notes, preset, channel).values()]
-
-
 def report(midi: Path, soundfont: Path, source_program: tuple[int, int, int],
            sf2_preset: tuple[int, int], channel: str, asset_budget: int | None) -> dict:
     timeline = afx_midi.parse(midi)

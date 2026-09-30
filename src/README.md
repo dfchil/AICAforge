@@ -7,15 +7,21 @@ make compiler
 build/afx_compile song.mid --zones instrument.zones song.afb song.afx
 ```
 
-`afx_profile` is the companion offline performance step. It binds an
-editable `.afp` JSON sidecar to one exact base AFX, creates a stable inventory
-of every note event and applies the sidecar's DSP scene/send setting to a
-derived AFX plus its matching AFC seek index:
+`afx_profile` is the companion offline performance step. It binds an editable
+`.afp` JSON sidecar to one exact base AFX and lowers its global, setup-template
+and per-note timbre/DSP-send choices to an ordinary derived AFX plus matching
+AFC seek index:
 
 ```sh
 build/afx_profile init song.afx song.afp room 112
 build/afx_profile apply song.afx song.afc song.afp song-performance.afx song-performance.afc
+build/afx_profile inventory song.afx
 ```
+
+`inventory` is a read-only selector list for an editor or a human author. It
+keeps the profile itself compact: a template is not repeated for every note it
+affects. See [the AFP specification](../../docs/specs/assets.md#afp--performance-profile)
+for the inheritance order and supported register fields.
 
 The compiler emits `song.afb`, `song.afx`, `song.afc`, and `song.afv` together.
 The AFB is one 32-byte-aligned payload; the AFX only contains setup registers

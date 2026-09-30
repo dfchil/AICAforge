@@ -81,6 +81,72 @@ static int flow_paths(const char *directory, const char *name, char afx[4096], c
            snprintf(afv, 4096, "%s/%s.afv", directory, name) >= 4096 ? -1 : 0;
 }
 
+static uint32_t align32(uint32_t value) { return (value + 31u) & ~31u; }
+
+static int index_paths(const char *afb, char index[4096], char named[4096]) {
+    size_t bytes = strlen(afb);
+    if (bytes < 4 || strcmp(afb + bytes - 4, ".afb") || bytes - 4u + 11u >= 4096) return -1;
+    return snprintf(index, 4096, "%.*s.afi", (int)(bytes - 4u), afb) >= 4096 ||
+           snprintf(named, 4096, "%.*s.names.afi", (int)(bytes - 4u), afb) >= 4096 ? -1 : 0;
+}
+
+static int write_afi(const char *path, const uint8_t *afb, uint32_t afb_bytes,
+                     const afx_c_zone_t *source, uint32_t source_count,
+                     const char (*zone_names)[AFX_C_SAMPLE_NAME_BYTES], int names) {
+    uint32_t afb_payload, *offsets = NULL, *zones = NULL;
+    if (!path || !afb || !source || !source_count || afb_bytes < AFX_BANK_HEADER_BYTES ||
+        afx_read32(afb) != AFX_BANK_MAGIC) return -1;
+    afb_payload = afx_read32(afb + 16);
+    if (afb_payload != AFX_BANK_HEADER_BYTES) return -1;
+    offsets = malloc((size_t)source_count * sizeof(*offsets));
+    zones = malloc((size_t)source_count * sizeof(*zones));
+    if (!offsets || !zones) goto failed;
+    uint32_t count = 0;
+    uint32_t bytes = 0;
+    for (uint32_t zone = 0; zone < source_count; ++zone) {
+        uint32_t sample = 0;
+        while (sample < count && (source[zone].sample.data != source[zones[sample]].sample.data ||
+                                  source[zone].sample.bytes != source[zones[sample]].sample.bytes)) ++sample;
+        if (sample != count) continue;
+        bytes = align32(bytes);
+        if (!source[zone].sample.bytes || bytes > afx_read32(afb + 20) ||
+            source[zone].sample.bytes > afx_read32(afb + 20) - bytes) goto failed;
+        offsets[count] = bytes; zones[count++] = zone;
+        if (source[zone].sample.bytes > UINT32_MAX - bytes) goto failed;
+        bytes += source[zone].sample.bytes;
+    }
+    uint32_t record_bytes = names ? AFX_INDEX_NAMED_RECORD_BYTES : AFX_INDEX_RECORD_BYTES;
+    uint64_t total = (uint64_t)AFX_INDEX_HEADER_BYTES + (uint64_t)count * record_bytes;
+    if (total > UINT32_MAX - 31u) goto failed;
+    uint32_t file_bytes = align32((uint32_t)total);
+    uint8_t *data = calloc(1, file_bytes);
+    if (!data) goto failed;
+    afx_write32(data, AFX_INDEX_MAGIC); afx_write32(data + 4, AFX_INDEX_VERSION);
+    afx_write32(data + 8, afx_read32(afb + 8)); afx_write32(data + 12, afx_read32(afb + 12));
+    afx_write32(data + 16, AFX_INDEX_HEADER_BYTES); afx_write32(data + 20, count);
+    afx_write32(data + 24, record_bytes); afx_write32(data + 28, file_bytes);
+    uint32_t cursor = AFX_INDEX_HEADER_BYTES;
+    for (uint32_t sample = 0; sample < count; ++sample) {
+        const afx_c_sample_t *entry = &source[zones[sample]].sample;
+        afx_write32(data + cursor, afb_payload + offsets[sample]);
+        afx_write32(data + cursor + 4, entry->sample_rate ? entry->sample_rate : 44100u);
+        afx_write32(data + cursor + 8, entry->frames);
+        data[cursor + 12] = entry->format;
+        if (names) {
+            char fallback[16] = {0};
+            const char *name = zone_names && zone_names[zones[sample]][0] ? zone_names[zones[sample]] :
+                               (snprintf(fallback, sizeof(fallback), "sample-%03u", sample), fallback);
+            memcpy(data + cursor + AFX_INDEX_RECORD_BYTES, name,
+                   strlen(name) < 16u ? strlen(name) : 16u);
+        }
+        cursor += record_bytes;
+    }
+    int error = write_file(path, data, file_bytes);
+    free(data); free(offsets); free(zones); return error ? -1 : 0;
+failed:
+    free(offsets); free(zones); return -1;
+}
+
 static void free_songs(song_t *songs, uint32_t count) {
     for (uint32_t i = 0; i < count; ++i) afx_c_sf2_output_free(&songs[i].resolved);
     free(songs);
@@ -104,11 +170,15 @@ static map_t *find_map(map_t *maps, uint32_t count, const char *song, const afx_
 
 static int append_resolved(afx_c_sf2_output_t *to, afx_c_sf2_output_t *from) {
     uint32_t old_zones = to->zone_count, old_notes = to->note_count, old_owned = to->owned_count;
-    if (from->zone_count > UINT16_MAX - old_zones || from->note_count > UINT32_MAX - old_notes ||
+    if (!from->zone_names || from->zone_count > UINT16_MAX - old_zones || from->note_count > UINT32_MAX - old_notes ||
         from->owned_count > UINT32_MAX - old_owned) return -1;
     afx_c_zone_t *zones = realloc(to->zones, (size_t)(old_zones + from->zone_count) * sizeof(*zones));
     if (!zones) return -1;
     to->zones = zones;
+    char (*names)[AFX_C_SAMPLE_NAME_BYTES] = realloc(to->zone_names,
+                                                      (size_t)(old_zones + from->zone_count) * sizeof(*names));
+    if (!names) return -1;
+    to->zone_names = names;
     afx_c_note_t *notes = realloc(to->notes, (size_t)(old_notes + from->note_count) * sizeof(*notes));
     if (!notes) return -1;
     to->notes = notes;
@@ -116,6 +186,8 @@ static int append_resolved(afx_c_sf2_output_t *to, afx_c_sf2_output_t *from) {
     if (!owned) return -1;
     to->owned_samples = owned;
     memcpy(to->zones + old_zones, from->zones, (size_t)from->zone_count * sizeof(*to->zones));
+    memcpy(to->zone_names + old_zones, from->zone_names,
+           (size_t)from->zone_count * sizeof(*to->zone_names));
     for (uint32_t i = 0; i < from->note_count; ++i) {
         if (!from->notes[i].setup_index || from->notes[i].setup_index > UINT16_MAX - old_zones) return -1;
         from->notes[i].setup_index = (uint16_t)(from->notes[i].setup_index + old_zones);
@@ -123,7 +195,8 @@ static int append_resolved(afx_c_sf2_output_t *to, afx_c_sf2_output_t *from) {
     memcpy(to->notes + old_notes, from->notes, (size_t)from->note_count * sizeof(*to->notes));
     memcpy(to->owned_samples + old_owned, from->owned_samples, (size_t)from->owned_count * sizeof(*to->owned_samples));
     to->zone_count += from->zone_count; to->note_count += from->note_count; to->owned_count += from->owned_count;
-    free(from->zones); free(from->notes); free(from->owned_samples); *from = (afx_c_sf2_output_t){0};
+    free(from->zones); free(from->zone_names); free(from->notes); free(from->owned_samples);
+    *from = (afx_c_sf2_output_t){0};
     return 0;
 }
 
@@ -268,15 +341,20 @@ static int build_per_song(const char *map_path, const char *directory) {
     if (parse_map(map_path, &sources, &source_count, &maps, &map_count, &songs, &song_count)) goto failed;
     for (uint32_t song = 0; song < song_count; ++song) {
         afx_c_output_t out = {0};
-        char afb[4096], afx[4096], afc[4096], afv[4096];
+        char afb[4096], afx[4096], afc[4096], afv[4096], afi[4096], named_afi[4096];
         if (resolve_song(songs + song, maps, map_count) ||
             afx_c_compile_zones(songs[song].resolved.notes, songs[song].resolved.note_count, 1000,
                                 songs[song].resolved.zones, songs[song].resolved.zone_count, &out)) goto failed;
         if (out.afb_bytes < AFX_BANK_HEADER_BYTES || out.afb_bytes - AFX_BANK_HEADER_BYTES > AFX_ASSET_MAX ||
             snprintf(afb, sizeof(afb), "%s/%s.afb", directory, songs[song].name) >= (int)sizeof(afb) ||
             flow_paths(directory, songs[song].name, afx, afc, afv) ||
+            index_paths(afb, afi, named_afi) ||
             write_file(afb, out.afb, out.afb_bytes) || write_file(afx, out.afx, out.afx_bytes) ||
-            write_file(afc, out.afc, out.afc_bytes) || write_file(afv, out.afv, out.afv_bytes)) {
+            write_file(afc, out.afc, out.afc_bytes) || write_file(afv, out.afv, out.afv_bytes) ||
+            write_afi(afi, out.afb, out.afb_bytes, songs[song].resolved.zones,
+                      songs[song].resolved.zone_count, songs[song].resolved.zone_names, 0) ||
+            write_afi(named_afi, out.afb, out.afb_bytes, songs[song].resolved.zones,
+                      songs[song].resolved.zone_count, songs[song].resolved.zone_names, 1)) {
             afx_c_output_free(&out); goto failed;
         }
         afx_c_output_free(&out);
@@ -298,6 +376,7 @@ int main(int argc, char **argv) {
     source_t *sources = NULL; map_t *maps = NULL; song_t *songs = NULL;
     uint32_t source_count = 0, map_count = 0, song_count = 0, zone_count = 0;
     afx_c_zone_t *zones = NULL;
+    char (*zone_names)[AFX_C_SAMPLE_NAME_BYTES] = NULL;
     if (parse_map(argv[1], &sources, &source_count, &maps, &map_count, &songs, &song_count)) goto failed;
     for (uint32_t song = 0; song < song_count; ++song) {
         if (resolve_song(songs + song, maps, map_count) || songs[song].resolved.zone_count > UINT32_MAX - zone_count ||
@@ -305,8 +384,14 @@ int main(int argc, char **argv) {
         afx_c_zone_t *grown = realloc(zones, (size_t)(zone_count + songs[song].resolved.zone_count) * sizeof(*zones));
         if (!grown) goto failed;
         zones = grown;
+        char (*grown_names)[AFX_C_SAMPLE_NAME_BYTES] = realloc(zone_names,
+            (size_t)(zone_count + songs[song].resolved.zone_count) * sizeof(*grown_names));
+        if (!grown_names) goto failed;
+        zone_names = grown_names;
         memcpy(zones + zone_count, songs[song].resolved.zones,
                (size_t)songs[song].resolved.zone_count * sizeof(*zones));
+        memcpy(zone_names + zone_count, songs[song].resolved.zone_names,
+               (size_t)songs[song].resolved.zone_count * sizeof(*zone_names));
         for (uint32_t note = 0; note < songs[song].resolved.note_count; ++note) {
             uint32_t setup = zone_count + songs[song].resolved.notes[note].setup_index;
             if (!setup || setup > UINT16_MAX) goto failed;
@@ -325,7 +410,12 @@ int main(int argc, char **argv) {
         }
         if (!song) {
             bank_low = afx_read32(out.afb + 8); bank_high = afx_read32(out.afb + 12);
-            if (write_file(argv[3], out.afb, out.afb_bytes)) { afx_c_output_free(&out); goto failed; }
+            char afi[4096], named_afi[4096];
+            if (write_file(argv[3], out.afb, out.afb_bytes) || index_paths(argv[3], afi, named_afi) ||
+                write_afi(afi, out.afb, out.afb_bytes, zones, zone_count, zone_names, 0) ||
+                write_afi(named_afi, out.afb, out.afb_bytes, zones, zone_count, zone_names, 1)) {
+                afx_c_output_free(&out); goto failed;
+            }
         }
         if (afx_read32(out.afx + 40) != bank_low || afx_read32(out.afx + 44) != bank_high) {
             afx_c_output_free(&out); goto failed;
@@ -337,8 +427,8 @@ int main(int argc, char **argv) {
         afx_c_output_free(&out);
         if (error) goto failed;
     }
-    free(sources); free(maps); free(zones); free_songs(songs, song_count); return 0;
+    free(sources); free(maps); free(zone_names); free(zones); free_songs(songs, song_count); return 0;
 failed:
-    free(sources); free(maps); free(zones); free_songs(songs, song_count);
+    free(sources); free(maps); free(zone_names); free(zones); free_songs(songs, song_count);
     fprintf(stderr, "cannot build shared bank from %s\n", argv[1]); return 1;
 }

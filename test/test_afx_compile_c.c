@@ -23,8 +23,8 @@ int main(void) {
     afx_c_output_free(&repeat);
     afx_c_output_free(&out);
     const uint8_t pcm[] = {0, 0, 0xff, 0x7f, 0, 0, 0, 0x80};
-    const afx_c_sample_t one_shot = {pcm, sizeof(pcm), 4, AFX_PCM16, 60, 0, 0, 3, 0};
-    assert(!afx_c_compile_pcm16(notes, 2, 1000, &one_shot, &out));
+    const afx_c_sample_t one_shot = {pcm, sizeof(pcm), 4, AFX_PCM16, 60, 0, 0, 3, 0, 44100};
+    assert(!afx_c_compile_sample(notes, 2, 1000, &one_shot, &out));
     assert(afx_file_validate(out.afx, out.afx_bytes, NULL) == AFX_OK);
     assert(out.afb_bytes == 32 + sizeof(pcm) && !memcmp(out.afb + 32, pcm, sizeof(pcm)));
     afx_c_output_free(&out);
@@ -39,8 +39,8 @@ int main(void) {
     const afx_c_note_t split_notes[] = {{0, 100, 60, 100, 0, 0, 0, 0},
                                         {100, 200, 72, 100, 0, 0, 0, 0}};
     const afx_c_zone_t zones[] = {
-        {{pcm, sizeof(pcm), 4, AFX_PCM16, 60, 0, 0, 3, 0}, 0, 65, 0, 127, 0, 0, 0, 0},
-        {{pcm, sizeof(pcm), 4, AFX_PCM16, 72, 1, 0, 3, 0}, 66, 127, 0, 127, 0, 0, 0, 0},
+        {{pcm, sizeof(pcm), 4, AFX_PCM16, 60, 0, 0, 3, 0, 44100}, 0, 65, 0, 127, 0, 0, 0, 0},
+        {{pcm, sizeof(pcm), 4, AFX_PCM16, 72, 1, 0, 3, 0, 44100}, 66, 127, 0, 127, 0, 0, 0, 0},
     };
     assert(!afx_c_compile_zones(split_notes, 2, 1000, zones, 2, &out));
     assert(afx_file_validate(out.afx, out.afx_bytes, NULL) == AFX_OK);
