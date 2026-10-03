@@ -24,10 +24,9 @@ creating them.
 | Which game SFX banks are preloaded together | Application AFSFX map |
 | Runtime interaction (engine pitch, position, intensity, STOP) | SH4 code |
 
-Generated AFB/AFX/AFC/AFV/AFI files are outputs, not the editable source of
-truth. Keep the map/profile and pinned source inputs reproducible. Changing
-the bank invalidates old bank bindings; changing an AFX invalidates its old
-AFC and the AFP hash bound to it. Rebuild rather than patching header hashes.
+Edit source inputs, maps and profiles; regenerate AFB/AFX/AFC/AFV/AFI outputs.
+A rebuilt bank needs matching AFX bindings. A changed AFX needs a matching
+AFC and updated AFP source binding.
 
 ```mermaid
 flowchart LR
@@ -60,14 +59,12 @@ build/afx_compile song.mid instrument.pcm song.afb song.afx
 Every native importer follows one pipeline: source parsing produces an
 unoptimized list of PCM zones plus `NOTE`, `PATCH`, and `KEYOFF` events; the
 shared optimizer chooses reusable setup templates; the shared emitter writes
-AFB/AFX and the applicable sidecars. Source parsers must not write AFX bytes
-themselves. The optimizer saves repeated setup words, not sample quality or
-musical detail: NOTE_PL and PATCH_LEVEL are compact encodings of the same
-register operations.
+AFB/AFX and the applicable sidecars. The optimizer shares repeated register
+setups and uses compact NOTE_PL/PATCH_LEVEL encodings without changing
+register state or event timing.
 
-The current PCM input is raw little-endian PCM16 at AICA's 44.1 kHz playback
-rate and uses MIDI key 69 as its root. This short form is intentionally a
-one-shot source. Use SF2/AFBM for the configurable sample-rate and instrument
+Raw PCM input is little-endian PCM16 at 44.1 kHz, with MIDI key 69 as its root.
+The short form plays one-shot samples. Use SF2/AFBM for sample-rate and instrument
 policies below, and AFP for derived register articulation.
 
 The C compiler also accepts a small text zone map for key-split instruments:
@@ -98,9 +95,9 @@ build/afx_compile song.mid --zones instrument.zones song.afb song.afx
 For SoundFont input, the reader uses each
 note's MIDI bank/program to select SF2 preset and instrument zones. The
 requested encoding is explicit; `auto` chooses the smallest format passing the
-same deterministic quality gate as zone maps (and conservatively skips ADPCM
-for looped sources), then uses the established PCM8 baseline. PCM16 remains
-an explicit mapping choice when a source needs it:
+same deterministic quality gate as zone maps: ADPCM requires 30 dB whole-sample
+and 24 dB attack SNR; otherwise PCM8 is used. Looped sources use PCM8.
+Select PCM16 explicitly for higher sample precision:
 
 ```sh
 build/afx_compile song.mid --sf2 auto GeneralUser.sf2 song.afb song.afx
@@ -115,9 +112,8 @@ values; neither the SH4 nor ARM7 parses SF2 data.
 Several songs can share one AFB. An `.afbm` text map declares any number of
 SoundFont sources, optionally selects `stereo`, `left`, or `right` from linked
 stereo samples, and routes each MIDI bank/program pair to a source preset.
-The stable map prefix is followed by named conversion options, so adding a
-policy never changes the meaning of an old column. This also lets one song
-combine several SoundFonts while runtime still sees exactly one bank:
+Each route has named conversion options. A song can combine several SoundFonts
+in one bank:
 
 ```text
 source gm        soundfonts/GeneralUser.sf2
@@ -147,26 +143,14 @@ build/afx_bank --create-map library.afbm GeneralUser.sf2 \
   title_theme midi/title_theme.mid field_theme midi/field_theme.mid
 ```
 
-This is a starting mapping, not an artistic choice of the best SoundFont or
-codec. Review its `auto` choices and edit routes/settings before building.
-Multiple `source` entries may refer to different SF2 libraries. **Current
-AFBM sources are SF2 only**; standalone PCM is supported by `afx_compile`
-and its low-level zone-map mode, not by an invented AFBM PCM directive.
+Review source presets, coding and rates before building. AFBM sources are SF2
+files; standalone PCM uses `afx_compile` or its zone-map mode.
 
-The available per-map options are `rate=<hz>`, `filter_offset=<cents>`,
-`filter=envelope|static|none`, `gain=standard|fluidsynth2`,
-`gain_bias=<centibels>`, `envelope=sf2|fixed`,
-`source_pan=apply|ignore`, `source_reverb=apply|ignore`, `dsp_send=<0..255>`,
-`modulators=apply|ignore`,
-`midi_channel=<0..15>`, `direct=<AICA-word>`, `lfo=<rate>,<pitch-depth>,<amplitude-depth>` and
-`loop_ms=<20..2000>`. `dsp_send` and `source_reverb=apply` are mutually
-exclusive. `modulators=apply` is the default: linear SF2 graph inputs are
-sampled at NOTE-on and folded into that note's existing setup/NOTE data.
-Curved and time-varying graph inputs remain deliberately unsupported rather
-than being guessed; use an AFP lane when an authored AICA PATCH is wanted.
-Defaults are SF2 envelope/filter, standard gain, source pan and modulators
-applied, and source reverb ignored. The map, not an AFP, owns all of these
-choices because they can change the bank payload or base setup.
+Map options control sample rate, loop trimming, envelope, filter, gain, pan,
+LFO, DSP send and SF2 modulators. Defaults use SF2 envelope/filter, standard
+gain, source pan and modulators, with source reverb ignored. Supported linear
+modulators are sampled at NOTE-on; use AFP lanes for sustained changes.
+See the [AFBM reference](specs/assets.md#afbm-reference) for values and defaults.
 
 `midi_channel` is an optional source selector, not an AICA output channel.
 It is useful when a score reuses a MIDI program number for separate parts,
@@ -183,9 +167,8 @@ is not implemented. Put deliberate rhythmic edits in the MIDI source.
 ## Performance profiles
 
 `build/afx_profile init` creates an editable JSON `.afp` file from an
-already-built AFX and binds it to that exact file with SHA-256. It creates
-compact defaults and empty template/override/lane collections, not an explicit
-entry for every note. `inventory` separately lists stable
+AFX and binds it to that file with SHA-256. It creates defaults and empty
+template/override/lane collections. `inventory` lists
 `{tick, ordinal, channel}` selectors and their source setups when needed.
 
 ```sh
@@ -206,26 +189,21 @@ list every note merely to enable DSP. See the
 [AFP reference](specs/assets.md#afp--performance-profile) for the complete
 schema, selectors, precedence and validation.
 
-The applier writes register choices into derived AFX, updates its identity and
-regenerates a matching AFC. Currently a changed profile gets a valid initial
-(tick-zero) checkpoint; SH4 seek replay reconstructs later positions from it,
-so do not assume the original dense checkpoint spacing is retained. A dry
-profile with no register changes copies AFX/AFC byte-for-byte. The AFB and its
-AFI remain unchanged. Regenerate AFV from the derived AFX, as above, so visual
-expression follows the actual emitted stream.
+Applying register changes rewrites the AFX and creates a matching AFC with a
+tick-zero checkpoint. SH4 reconstructs later seek positions by replaying events.
+With no register changes, AFX/AFC are copied byte-for-byte. AFB and AFI are
+unchanged. Regenerate AFV from the derived AFX to update the visualization.
 
 `describe` prints `preset default-send tempo_q8_8` for the build to place in
 its player metadata. Presets are `dry`, `room`, `room_warm` and `room_large`.
-The **preset name and tempo are not installed by loading the AFX**: the SH4
-player must construct/install the DSP scene and call `afx_instance_tempo()`.
-The derived AFX carries channel DSP-send words. AICA has one scene program,
-not one DSP program per note. `tempo_q8_8=256` is authored speed; this optional
-whole-flow scale does not move individual NOTE/KEYOFF positions in the file.
+The SH4 player installs the DSP scene and calls `afx_instance_tempo()` using
+that metadata. The derived AFX carries channel DSP-send words.
+`tempo_q8_8=256` is authored speed; scaling it preserves the file's individual
+NOTE/KEYOFF positions. AICA has one scene DSP program shared by all voices.
 
-An old AFP intentionally fails its hash binding after the base AFX changes.
-Inspect/recreate the profile against the new inventory rather than replacing
-its hash blindly. The current `apply` CLI takes an AFX **and matching AFC**;
-DKR's controlled SFX path has no AFC and is not this profile workflow.
+If the base AFX changes, inspect its new inventory and recreate the profile.
+`apply` requires both an AFX and a matching AFC. Controlled SFX has no AFC and
+cannot use this command.
 
 The optional fourth `song` field reserves a release tail in milliseconds. It
 keeps that AICA channel unavailable after its musical `KEYOFF`, so an SF2
@@ -249,9 +227,12 @@ An infinite source loop is cut at its first boundary to produce a finite
 audition flow. The optional last argument is a zero-based ALBank index.
 
 SFX IDs are one-based raw ALInstrument roots, **not game `SOUND_*` enums**.
-The current SFX chain interpretation follows DKR's ALBank/key-map policy.
+SFX chain interpretation follows DKR's ALBank/key-map policy.
 Finite components receive KEYOFF; sustained source components use controlled
-PARK so SH4 owns STOP. Sample looping alone does not decide lifetime. SFX
+PARK so SH4 owns STOP. Finite components still receive KEYOFF in a parked
+chain. Negative source decay disables amplitude decay. Each component's setup
+keeps its NOTE pitch and mix as the base for live SH4 scaling.
+Sample looping alone does not decide lifetime. SFX
 emit AFB/AFX, not song seek/visual sidecars. See
 [SFX bank maps](specs/afsfx.md) for grouping and the logical/raw-ID distinction.
 
@@ -285,15 +266,15 @@ chip emulator: YM2612, PSG and arbitrary chips are not supported by this tool.
 
 - MIDI timing, running status, bank/program, note-off, sustain and all-notes-off
   are parsed offline. Controllers/pressure are captured at NOTE-on for SF2
-  lowering; general sustained MIDI controller automation is not yet emitted
-  as PATCH. AFP lanes can express deliberate sustained changes.
+  lowering; subsequent controller changes are not emitted as PATCH.
+  Use AFP lanes for sustained changes.
 - SF2 supports static envelope/filter/pan/gain and supported linear modulator
   inputs sampled at NOTE-on. Curved/time-varying graphs are not a generic
   runtime modulator engine. `auto` is a deterministic signal-quality heuristic,
   not a guarantee that no human can hear the encoding difference.
-- N64 CSeq and OoT AudioSeq are different languages. AudioSeq is research
-  code, not another native CSeq mode. Other N64 SFX chain conventions need
-  source-specific lowering; B1 alone does not guarantee DKR-compatible SFX.
+- N64 CSeq and OoT AudioSeq use different parsers. AudioSeq has only an
+  experimental reader. Other N64 SFX chain conventions need source-specific
+  lowering; B1 alone does not guarantee DKR-compatible SFX.
 - Memory and per-tick voice/register-work limits are enforced during authoring
   and runtime. A valid standalone asset can still fail to fit with other live
   banks or DSP reservations. See [Memory](memory.md) and [Testing](testing.md).

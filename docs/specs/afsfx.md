@@ -1,75 +1,44 @@
-# AFSFX — offline SFX bank maps
+# AFSFX — SFX bank maps
 
-An `.afsfx` is a tracked text description of **which source sound effects
-belong together in preloaded banks**. It is useful when a game has more sounds
-than fit in AICA RAM at once: keep common gameplay sounds resident, prepare
-scene-specific groups when useful, and load the rest on demand.
+AFSFX is an offline text map that groups source sound effects into preloaded
+banks. Build outputs are ordinary AFB sample banks and bank-bound AFX flows.
+The application loads the banks; SH4 and ARM7 do not parse AFSFX.
 
-This role is reusable across N64 projects. It is not another AICA playback
-format and must not encode a new runtime sound interpreter. The resulting
-assets are the same AFB sample banks and AFX register flows used for music.
+The reader is DKR's `dreamcast/build_aicaflow_sfx.py`, using AICAflow's
+`afx_n64 --sfx` converter and `afx_bank --merge` packer. The map is
+`dreamcast/aicaflow_tools/dkr.afsfx` in the DKR repository. The grammar below
+is DKR-specific, including `core`, `vehicle` and vehicle masks.
 
-## Implementation status and ownership
+## File roles
 
-The implemented reader is currently **DKR's application script**,
-`dreamcast/build_aicaflow_sfx.py`. AICAflow supplies the native C converter
-`afx_n64 --sfx` and the lossless packer `afx_bank --merge`; neither reads an
-AFSFX file itself. SH4 and ARM7 do not load this text file at runtime.
-
-This document records that reader's real grammar. In particular, its `core`
-and `vehicle` bank names and vehicle masks are DKR policy, not universal AICA
-or N64 requirements. Another N64 project can reuse the grouping/residency
-concept, but cannot assume its raw sound IDs, scene IDs or sequence format
-match DKR. A generic native AFSFX reader is not implemented yet. Do not invent
-extra directives and expect the current builder to accept them.
-
-The checked-in DKR source map is `dreamcast/aicaflow_tools/dkr.afsfx`. Its
-reader and game loader are the authority for DKR behavior; this specification
-is maintained in AICAflow so other integrations can share the explanation.
-
-## Distinguish the files
-
-| File | Question it answers |
+| Input | Controls |
 | --- | --- |
-| AFSFX | Which complete source SFX chains should be grouped/preloaded? |
-| AFBM | Which MIDI/SF2 sources, presets and conversion policies build a bank? |
-| AFP | Which authored AICA register/performance values should change? |
-| AFB | Where are the final encoded sample bytes? |
-| AFX | Which registers should be written, and when? |
-| AFI | How can SH4 locate/describe samples for direct one-shot code? |
+| AFSFX | SFX grouping and preload membership |
+| AFBM | MIDI/SF2 sources and bank conversion policy |
+| AFP | AICA register and performance adjustments |
 
-AFSFX does not choose codec/rate, replace samples, impose sound duration, add
-DSP or correct looping by sound name. Those belong to the source importer,
-bank authoring and ordinary AICA commands. Listing a sound in `core` makes it
-eligible for preloading; it does not force the sound to play or loop.
+Sample coding, envelopes and sound lifetime are handled by the importer.
+AFI catalogs describe samples for SH4 one-shot code; they do not group SFX.
 
-## Source IDs are not sample offsets or game enums
+## IDs
 
-DKR's `sound-id` is a **one-based entry in the ALInstrument sound list** used
-by its SFX bank. The native importer starts at that entry and follows its
-source-linked component chain. A chain can use several samples and AICA
-channels. List the root ID once; its component IDs need not also be listed.
+A `sound-id` is a **one-based raw ALInstrument sound-chain root**. The importer
+follows its component chain, which can use several samples and AICA channels.
+List the root once; its components are included automatically.
 
-Do not put these other values in an AFSFX sound list:
+DKR translates logical `SOUND_*` IDs through
+`gSoundTable[logical_id].soundBite` in `src/audio.c`. Use the resulting raw ID
+in the map, not the enum, an AFI position, a sample offset or an AICA channel.
+Generated flow filenames keep the raw ID, for example `563.afx`.
 
-- A `SOUND_*` game enum / logical sound-table index. DKR first resolves that
-  through `gSoundTable[logical_id].soundBite` in `src/audio.c`.
-- A sample's byte address, AFI catalog position or AFB offset.
-- An AICA physical channel, or a CSeq song number.
+Scene IDs are zero-based application level IDs. Several logical sounds can
+share a raw root while applying different live pitch, volume or pan.
 
-The AFX filename keeps the raw root ID (`563.afx`, for example). Several
-logical game sounds may select one raw root, then apply different live pitch,
-volume or pan. Correct grouping cannot compensate for a wrong ID translation.
+## Grammar
 
-Scene IDs are a different space: zero-based application scene/level IDs.
-The loader receives one of these IDs when preparing a scene.
-
-## Current DKR text grammar
-
-The file is whitespace-separated text, read as UTF-8 on the supported hosts.
-Blank lines and `#` comments are ignored. An inline `#` ends a line. There are
-no quoted paths, JSON objects, binary headers, version/magic directive, sample
-names or references to another map. Directive names are case-sensitive.
+UTF-8 whitespace-separated text. Blank lines and `#` comments are ignored;
+inline `#` comments are supported. Directives are case-sensitive. Numbers are
+decimal integers.
 
 ```text
 scene-count <N>
@@ -79,125 +48,98 @@ bank vehicle <sound-id> [sound-id ...]
 scene <scene-id> <sound-id> [sound-id ...]
 ```
 
-Write IDs and counts as decimal integers. Use one `scene-count` and one
-`vehicle-masks` declaration, both required. Declare both banks even if a
-particular scene needs no vehicle sounds; the current grammar requires each
-bank to have at least one ID and accepts exactly those two bank names.
-Optional `scene` lines may appear in any order. A missing scene line means
-"no scene-local preload pack", not "no sounds may play in this scene".
-
-| Directive | Meaning and validation |
+| Directive | Requirements |
 | --- | --- |
-| `scene-count N` | `N >= 1`; declares the range `0..N-1`. |
-| `vehicle-masks ...` | Exactly N values, each `0..7`; car=1, hovercraft=2, plane=4, combinations use bitwise OR. |
-| `bank core ...` | Common resident raw sound IDs; IDs must be positive. |
-| `bank vehicle ...` | Vehicle-class raw sound IDs; IDs must be positive. |
-| `scene id ...` | One nonempty raw-ID list for scene `0..N-1`. |
+| `scene-count N` | Required; `N >= 1`. |
+| `vehicle-masks ...` | Required; exactly N values in `0..7`. Car=1, hovercraft=2, plane=4; combine with bitwise OR. |
+| `bank core ...` | Required, nonempty positive raw-ID list. |
+| `bank vehicle ...` | Required, nonempty positive raw-ID list. |
+| `scene id ...` | Optional, nonempty raw-ID list for scene `0..N-1`. |
 
-The reader sorts and deduplicates IDs within each list. Duplicate `bank` or
-`scene` definitions, missing required fields, unknown directives, invalid
-integers, out-of-range scenes/masks, and overlap between core and vehicle IDs
-are errors. Source existence/upper sound-ID bounds are checked by the native
-importer, not inferred from the map. Avoid repeating a resident sound in a
-scene pack; the current reader does not reject that redundant cross-pack copy.
-Repeated `scene-count`/`vehicle-masks` declarations currently replace the
-previous value; authors should not rely on that parser behavior.
+Only the two named banks are supported. IDs in each list are sorted and
+deduplicated. Duplicate bank/scene declarations, unknown directives, missing
+fields, invalid integers, out-of-range masks/scenes and overlapping core/vehicle
+IDs are errors. The importer checks whether each raw ID exists in the source.
 
-### Small example
+Declare `scene-count` and `vehicle-masks` once: repeated declarations replace
+the earlier values. Avoid listing a resident sound in a scene pack; this
+redundancy is allowed by the parser but duplicates sample data across banks.
 
-This is a three-scene illustration using DKR raw sound IDs, not a replacement
-for the full game map:
+### Example
 
 ```text
 scene-count 3
 vehicle-masks 1 0 4
 
-bank core 1 4 563       # common sounds, including a complete component chain
+bank core 1 4 563       # common sounds
 bank vehicle 42 43
 
 scene 0 92
 scene 2 89 91
 ```
 
-Scene 0 has a local pack and needs vehicle audio. Scene 1 has neither a local
-pack nor a vehicle requirement; it may still use core and fallback sounds.
-Scene 2 has another local pack and needs vehicle audio.
+Scenes 0 and 2 have local packs and need vehicle audio. Scene 1 uses core and
+on-demand sounds. A missing scene line means no local preload pack.
+Any nonzero vehicle mask loads the **entire** `vehicle.afb`; masks do not select
+separate car, plane or hovercraft sample subsets.
 
-**Current loader detail:** any nonzero vehicle mask loads the entire single
-`vehicle.afb`. It does not load separate car/plane/hovercraft banks or filter
-that bank's samples by bit. The bits preserve the source scene policy, while
-the current residency decision is simply zero versus nonzero.
+## Build
 
-## Build path and generated output
-
-In a DKR checkout, after extraction and `make -C third_party/aicaflow compiler`:
+Run from an extracted DKR checkout with Python 3.10+:
 
 ```sh
+make -C third_party/aicaflow compiler
 python3 dreamcast/build_aicaflow_sfx.py . \
   third_party/aicaflow/build/afx_n64 \
   third_party/aicaflow/build/afx_bank \
   dreamcast/aicaflow_tools/dkr.afsfx build/dc/aicaflow
 ```
 
-Use the same Python 3.10+ interpreter selected for the game build. `Makefile.dc`
-already runs this command when its source inputs, map or native tools change;
-manual generation is for inspection. The application script reads extracted
-SFX control/table inputs `asset_audio_2.bin` and `asset_audio_3.bin`.
-
-For each pack, it invokes the C importer for each raw root, then invokes the C
-merger. Samples are deduplicated **within** a final bank; the merger preserves
-their codec and encoded bytes. Cross-bank duplicates remain separate because
-one AFX binds to one AFB, not a collection of banks.
+`Makefile.dc` invokes the builder when inputs change. Source SFX control and
+sample data are `asset_audio_2.bin` and `asset_audio_3.bin`.
+The builder converts each raw root and merges each pack, deduplicating encoded
+samples within the bank without re-encoding them.
 
 ```text
 build/dc/aicaflow/
   core.afb                 common sample block
-  core/<raw-id>.afx        flows bound to core.afb
-  vehicle.afb              one vehicle sample block
-  vehicle/<raw-id>.afx     flows bound to vehicle.afb
-  scenes/<scene-id>.afb    one block for each listed scene
+  core/<raw-id>.afx        controls bound to core.afb
+  vehicle.afb              vehicle sample block
+  vehicle/<raw-id>.afx     controls bound to vehicle.afb
+  scenes/<scene-id>.afb    local sample blocks
   scenes/<scene-id>/<raw-id>.afx
-  sfx_manifest.h           generated SH4 tables: IDs, presence, masks and sizes
-  manifest.json            generated build-verification metadata
+  sfx_manifest.h           SH4 IDs, masks, presence and memory sizes
+  manifest.json            verification metadata
 ```
 
-Hidden `.core.raw`, `.vehicle.raw` and per-scene `.raw` directories contain
-intermediate per-sound AFB/AFX pairs. They are build artifacts, not source maps
-or additional runtime formats. Regenerate outputs; do not hand-edit manifests,
-bank identities or relocated sample addresses.
+Hidden `.core.raw`, `.vehicle.raw` and per-scene `.raw` directories hold
+intermediate AFB/AFX pairs. Edit the map and regenerate; manifests and bank
+bindings are generated data.
 
-Fallback is built separately by `dreamcast/build_aicaflow_fallback.py` for
-**every** source root, including ones absent from the map. It produces
-`fallback/<raw-id>.afb`, `fallback/controls/<raw-id>.afx` and its own manifest.
-AFSFX changes grouping, not the fallback corpus.
+`dreamcast/build_aicaflow_fallback.py` separately builds every source root as
+`fallback/<raw-id>.afb` and `fallback/controls/<raw-id>.afx`. Removing a sound
+from a preload pack leaves it available on demand.
 
-## Runtime residency and lifetime
+## Residency and lifetime
 
-The generated header, not the text map, is compiled into DKR. The game keeps
-the core bank resident. It keeps the vehicle bank when required and attempts
-to preload a scene-local bank when memory permits; otherwise it falls back to
-individual on-demand pairs. A declared scene pack is not a guarantee that it
-can coexist with every music flow, DSP ring and active voice.
+DKR compiles the generated header into the game, keeps core resident, loads
+vehicle when needed and preloads scene banks when memory permits. Otherwise,
+requests use on-demand pairs.
 
-The loader's current 64 KiB headroom test is a preload decision, not a reserved
-allocator partition. Its calculated scene size includes aligned sample-bank
-payload and AFX images, not just the `.afb` file size. Active flows retain
-their bank; scene teardown stops/recycles instances before releasing it.
+Scene preload checks leave 64 KiB headroom. This is a loading threshold, not
+an allocator reservation. Pack costs include aligned AFB payloads and AFX
+images; music, DSP and other live allocations also consume the arena.
 
-Sample looping and sound lifetime are independent. The C importer derives
-KEYOFF/END or controlled PARK from the source chain/envelope semantics. A
-sample loop does not by itself mean a forever-playing SFX. SH4 owns STOP for a
-parked flow. AFSFX must not contain per-sound timeout hacks.
+A flow retains its bank. Scene teardown must stop/recycle instances and free
+flows before releasing the bank. The importer derives KEYOFF/END or PARK from
+source chain/envelope semantics. Looped samples can belong to finite sounds;
+SH4 owns STOP for parked flows.
 
-For another N64 project, establish its raw-ID/chain semantics, logical-ID
-translation, scene transitions and preload policy first. A B1 ALBank does not
-imply that the game's SFX-chain metadata or music sequence language is DKR's;
-OoT AudioSeq is a separate source format. Reuse AFB/AFX and the shared authoring
-pipeline without claiming that the existing DKR application parser is universal.
+For another N64 project, define its logical-to-raw ID translation, chain
+semantics and scene policy. B1 ALBank alone does not imply DKR-compatible SFX.
+OoT AudioSeq is a separate sequence language.
 
-## Verification and safe editing
-
-Add `--verify` to the pack command to compare existing outputs with the map:
+## Verify
 
 ```sh
 python3 dreamcast/build_aicaflow_sfx.py . \
@@ -207,14 +149,7 @@ python3 dreamcast/build_aicaflow_sfx.py . \
 make -f Makefile.dc aicaflow-fallback-verify
 ```
 
-The first check validates membership, masks, scene sizes and basic AFB/AFX
-file ranges. It does not recompile/recompare source audio or prove that an ID
-is the sound a human intended. Fallback verification checks recorded file
-lengths and SHA-256 values. Test source interpretation and audible behavior
-separately; see [Testing](../testing.md).
-
-When editing a map, resolve raw IDs from the source, regenerate with the
-application build, inspect pack memory costs and test the relevant scene and
-live controls. Commit the map and build/documentation changes, not extracted
-game samples. Residency may improve latency; it does not add more than AICA's
-64 hardware voices or bypass runtime execution/memory limits.
+Pack verification checks membership, masks, scene sizes and basic AFB/AFX
+ranges. Fallback verification checks recorded file lengths and SHA-256 values.
+Test sound selection, live controls, lifetime and scene transitions in the game;
+see [Testing](../testing.md).
