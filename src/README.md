@@ -67,6 +67,14 @@ marked `PARK`/controlled so the game, rather than an invented duration, owns
 its lifetime. SFX do not need an AFC seek sidecar. `afx_bank --merge` accepts
 such AFX/AFB pairs and rewrites them into one shared SFX bank.
 
+The SFX path preserves the accepted N64/Python sample policy: try the source
+rate and lower 16/11.025/8 kHz candidates, then select the smallest coding
+whose decoded, resampled result meets 30 dB full-sample and 24 dB attack SNR
+against the original. Loops use PCM8 or PCM16, never ADPCM. Negative N64 decay
+means no AICA decay; finite components still get KEYOFF even in a chain with
+a sustained component. Each component's template retains its NOTE's baseline
+pitch and mix so SH4 can scale live controls correctly.
+
 `afx_vgm` follows that identical final pipeline for Sega MultiPCM VGM/VGZ
 captures. Its source register writes become raw NOTE/PATCH/KEYOFF events; the
 same optimizer handles its setup dictionary and the same emitter writes the
@@ -144,6 +152,9 @@ map for that song/program.
 single-song AFB+AFX+AFC sets. It deduplicates their sample payloads into one
 AFB and rewrites each flow and seek sidecar to bind to that bank. It is how
 DKR's direct CSeq path makes its shared music bank; it adds no runtime format.
+Merging is lossless: it preserves sample bytes and coding, loop bounds and
+playback parameters. Quality/format decisions belong to the source importer
+or bank map, not to the merge operation.
 
 ```sh
 build/afx_bank --merge music.afb controls raw/sequence_*.afx

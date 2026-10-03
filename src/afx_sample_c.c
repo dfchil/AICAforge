@@ -195,3 +195,40 @@ int afx_c_encode_sample(const uint8_t *pcm16, uint32_t frames, int looping, uint
     free(source);
     *out_data = data; *out_bytes = (frames + 1u) / 2u; *out_format = AFX_ADPCM; return 0;
 }
+
+int afx_c_encode_sample_at_rate(const uint8_t *pcm16, uint32_t frames,
+                                uint32_t source_rate, uint32_t target_rate, int looping,
+                                double minimum_snr, double minimum_attack_snr,
+                                uint8_t **out_data, uint32_t *out_bytes,
+                                uint8_t *out_format, uint32_t *out_frames) {
+    uint8_t *sampled = NULL, *encoded = NULL, *restored = NULL, *best = NULL;
+    int16_t *decoded = NULL;
+    uint32_t sampled_frames, restored_frames, best_bytes = UINT32_MAX;
+    uint8_t best_format = AFX_PCM16;
+    if (!out_data || !out_bytes || !out_format || !out_frames ||
+        isnan(minimum_snr) || isnan(minimum_attack_snr) ||
+        afx_c_resample_pcm16(pcm16, frames, source_rate, target_rate, &sampled, &sampled_frames)) return -1;
+    if (!sampled_frames || sampled_frames > 65535u) { free(sampled); return 1; }
+    decoded = malloc((size_t)sampled_frames * sizeof(*decoded));
+    if (!decoded) goto failed;
+    for (uint8_t format = AFX_PCM16; format <= (looping ? AFX_PCM8 : AFX_ADPCM); ++format) {
+        uint32_t bytes; uint8_t actual_format;
+        if (afx_c_encode_sample(sampled, sampled_frames, looping, format, &encoded, &bytes, &actual_format)) goto failed;
+        if (format == AFX_ADPCM) adpcm_decode(encoded, sampled_frames, decoded);
+        else for (uint32_t i = 0; i < sampled_frames; ++i)
+            decoded[i] = format == AFX_PCM16 ? read_pcm16(encoded + 2u * i) : (int8_t)encoded[i] * 256;
+        if (afx_c_resample_pcm16((const uint8_t *)decoded, sampled_frames, target_rate, source_rate,
+                                 &restored, &restored_frames)) goto failed;
+        uint32_t compared = frames < restored_frames ? frames : restored_frames;
+        if (bytes < best_bytes && meets_quality(pcm16, (const int16_t *)restored, compared,
+                                                minimum_snr, minimum_attack_snr)) {
+            free(best); best = encoded; encoded = NULL; best_bytes = bytes; best_format = actual_format;
+        }
+        free(encoded); encoded = NULL; free(restored); restored = NULL;
+    }
+    free(sampled); free(decoded);
+    if (!best) return 1;
+    *out_data = best; *out_bytes = best_bytes; *out_format = best_format; *out_frames = sampled_frames; return 0;
+failed:
+    free(sampled); free(encoded); free(restored); free(best); free(decoded); return -1;
+}

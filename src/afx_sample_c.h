@@ -32,4 +32,14 @@ int afx_c_encode_sample_auto(const uint8_t *pcm16, uint32_t frames,
                              uint8_t **out_data, uint32_t *out_bytes,
                              uint8_t *out_format);
 
+/* Choose the smallest coding at one candidate rate, measuring the decoded,
+ * upsampled result against the original source (including its attack).
+ * Loops use PCM only. Returns 1 when no coding passes, -1 on invalid input or
+ * allocation failure, and 0 with caller-owned data on success. */
+int afx_c_encode_sample_at_rate(const uint8_t *pcm16, uint32_t frames,
+                                uint32_t source_rate, uint32_t target_rate, int looping,
+                                double minimum_snr, double minimum_attack_snr,
+                                uint8_t **out_data, uint32_t *out_bytes,
+                                uint8_t *out_format, uint32_t *out_frames);
+
 #endif

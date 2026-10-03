@@ -134,7 +134,7 @@ static int make_pcm16(const bank_t *bank, uint32_t wavetable, uint8_t **out, uin
         uint32_t book = be32(wave + 16u); int order, predictors;
         if (!within(book, bank->control_bytes, 8)) return -1;
         order = sbe32(control + book); predictors = sbe32(control + book + 4u);
-        if (order != 2 || predictors < 1 || predictors > 16 || !within(book + 8u, bank->control_bytes, (uint32_t)predictors * 16u)) return -1;
+        if (order != 2 || predictors < 1 || predictors > 16 || !within(book + 8u, bank->control_bytes, (uint32_t)predictors * 32u)) return -1;
         length = length / 9u * 9u; if (!length) return -1;
         pcm = malloc((size_t)(length / 9u) * 32u); if (!pcm) return -1;
         int16_t coefficients[256];
@@ -153,7 +153,7 @@ static int make_pcm16(const bank_t *bank, uint32_t wavetable, uint8_t **out, uin
     *out = pcm; *out_frames = frames; return 0;
 }
 
-static int cache_sample(const bank_t *bank, uint32_t wavetable, cached_sample_t **items,
+static int cache_sample(const bank_t *bank, uint32_t wavetable, int sfx, cached_sample_t **items,
                         uint32_t *count, uint32_t *capacity, const afx_c_sample_t **out) {
     for (uint32_t i = 0; i < *count; ++i) if ((*items)[i].wavetable == wavetable) { *out = &(*items)[i].sample; return 0; }
     if (*count == *capacity) {
@@ -166,15 +166,36 @@ static int cache_sample(const bank_t *bank, uint32_t wavetable, cached_sample_t 
     if (make_pcm16(bank, wavetable, &source, &source_frames, &loop_start, &loop_end, &looping)) return -1;
     uint32_t rate = bank->rate;
     if (source_frames > 65535u) rate = (uint32_t)((uint64_t)65535u * bank->rate / source_frames);
-    if (rate < 4000u || afx_c_resample_pcm16(source, source_frames, bank->rate, rate, &resampled, &frames) || !frames || frames > 65535u) goto failed;
+    uint32_t bytes; uint8_t format;
+    if (rate < 4000u) goto failed;
+    if (sfx) {
+        const uint32_t rates[] = {rate, 16000, 11025, 8000};
+        uint32_t best_bytes = UINT32_MAX;
+        for (uint32_t i = 0; i < sizeof(rates) / sizeof(*rates); ++i) {
+            uint8_t *candidate = NULL, candidate_format; uint32_t candidate_bytes, candidate_frames;
+            if (i && rates[i] >= rates[0]) continue;
+            int result = afx_c_encode_sample_at_rate(source, source_frames, bank->rate, rates[i], looping,
+                30.0, 24.0, &candidate, &candidate_bytes, &candidate_format, &candidate_frames);
+            if (result < 0) goto failed;
+            if (!result && candidate_bytes < best_bytes) {
+                free(encoded); encoded = candidate; candidate = NULL;
+                rate = rates[i]; frames = candidate_frames; best_bytes = candidate_bytes; format = candidate_format;
+            }
+            free(candidate);
+        }
+        if (!encoded) goto failed;
+        bytes = best_bytes;
+    } else {
+        if (afx_c_resample_pcm16(source, source_frames, bank->rate, rate, &resampled, &frames) || !frames || frames > 65535u ||
+            afx_c_encode_sample_auto(resampled, frames, looping ? 30.0 : 24.0, looping ? 24.0 : -INFINITY,
+                                     AFX_PCM8, &encoded, &bytes, &format)) goto failed;
+    }
     if (looping) {
-        loop_start = rounded_ratio(loop_start, rate, bank->rate); loop_end = rounded_ratio(loop_end, rate, bank->rate);
+        loop_start = sfx ? (uint32_t)nearbyint((double)loop_start * rate / bank->rate) : rounded_ratio(loop_start, rate, bank->rate);
+        loop_end = sfx ? (uint32_t)nearbyint((double)loop_end * rate / bank->rate) : rounded_ratio(loop_end, rate, bank->rate);
         if (loop_start >= loop_end || loop_end > frames) goto failed;
         --loop_end; /* B1 loop end is exclusive; AICA LEA is inclusive. */
     } else loop_start = 0, loop_end = frames - 1u;
-    uint32_t bytes; uint8_t format;
-    if (looping ? afx_c_encode_sample(resampled, frames, 1, AFX_PCM16, &encoded, &bytes, &format) :
-                  afx_c_encode_sample_auto(resampled, frames, 24.0, -INFINITY, AFX_PCM16, &encoded, &bytes, &format)) goto failed;
     free(source); free(resampled);
     (*items)[*count] = (cached_sample_t){wavetable, {encoded, bytes, frames, format, 60, (uint8_t)looping,
                                         (uint16_t)loop_start, (uint16_t)loop_end, 0, rate}, encoded};
@@ -270,7 +291,7 @@ static int lower(const bank_t *bank, const afx_c_note_t *input, uint32_t input_c
         if (selected > 0) continue;
         if (selected < 0) goto failed;
         const afx_c_sample_t *sample;
-        if (cache_sample(bank, sound.wavetable, &cache, &cache_count, &cache_capacity, &sample)) goto failed;
+        if (cache_sample(bank, sound.wavetable, 0, &cache, &cache_count, &cache_capacity, &sample)) goto failed;
         const uint8_t *keymap = bank->control + sound.keymap, *env = bank->control + sound.envelope;
         uint8_t attack_volume = env[12] ? env[12] : 1, decay_volume = env[13] ? env[13] : 1;
         int decay_level = (int)lround(-20.0 * log10((double)decay_volume / attack_volume) / 3.0103);
@@ -423,7 +444,7 @@ static int read_sound(const bank_t *bank, uint32_t at, sound_t *out) {
 }
 
 static uint16_t sfx_pitch(uint32_t rate, int cents) {
-    int rate_cents = (int)lround(1200.0 * log2((double)rate / 44100.0));
+    int rate_cents = (int)nearbyint(1200.0 * log2((double)rate / 44100.0));
     double ratio = pow(2.0, ((double)cents + rate_cents) / 1200.0);
     int octave = (int)floor(log2(ratio));
     int fraction = (int)(1024.0 * (ratio / pow(2.0, octave) - 1.0));
@@ -435,7 +456,7 @@ static uint16_t sfx_pitch(uint32_t rate, int cents) {
 static uint16_t sfx_mix(uint8_t sample_volume, uint8_t attack_volume) {
     double gain = (double)(sample_volume ? sample_volume : 1u) * (attack_volume ? attack_volume : 1u) /
                   (127.0 * 127.0);
-    int total_level = (int)lround(fmax(0.0, -2000.0 * log10(gain)) / 40.0);
+    int total_level = (int)nearbyint(fmax(0.0, -2000.0 * log10(gain)) / 40.0);
     if (total_level > 255) total_level = 255;
     return (uint16_t)(total_level << 8 | 0x24u);
 }
@@ -444,7 +465,7 @@ static int lower_sfx(const bank_t *bank, unsigned requested, afx_c_event_t **out
                      uint32_t *out_event_count, uint32_t *out_duration,
                      afx_c_zone_t **out_zones, uint32_t *out_zone_count,
                      int *out_park) {
-    uint32_t instrument, sound_count, sound_at, cursor_us = 0, duration = 0, cache_count = 0, cache_capacity = 0;
+    uint32_t instrument, sound_count, sound_at, cursor_us = 0, duration = 0, used = 0, cache_count = 0, cache_capacity = 0;
     cached_sample_t *cache = NULL;
     afx_c_event_t *events = NULL;
     afx_c_zone_t *zones = NULL;
@@ -453,7 +474,7 @@ static int lower_sfx(const bank_t *bank, unsigned requested, afx_c_event_t **out
     if (!requested || bank_instrument(bank, 0, 0, &instrument)) goto done;
     sound_count = (uint32_t)sbe16(bank->control + instrument + 14u);
     if (requested > sound_count) goto done;
-    events = calloc(32, sizeof(*events)); zones = calloc(16, sizeof(*zones)); seen = calloc(sound_count + 1u, 1);
+    events = calloc(33, sizeof(*events)); zones = calloc(16, sizeof(*zones)); seen = calloc(sound_count + 1u, 1);
     if (!events || !zones || !seen) goto done;
     unsigned component = requested;
     for (uint32_t index = 0; component; ++index) {
@@ -463,7 +484,7 @@ static int lower_sfx(const bank_t *bank, unsigned requested, afx_c_event_t **out
         if (index == 16 || component > sound_count || seen[component]) goto done;
         seen[component] = 1;
         sound_at = be32(bank->control + instrument + 16u + (component - 1u) * 4u);
-        if (read_sound(bank, sound_at, &sound) || cache_sample(bank, sound.wavetable, &cache, &cache_count, &cache_capacity, &sample)) goto done;
+        if (read_sound(bank, sound_at, &sound) || cache_sample(bank, sound.wavetable, 1, &cache, &cache_count, &cache_capacity, &sample)) goto done;
         keymap = bank->control + sound.keymap; env = bank->control + sound.envelope;
         cents = (int)keymap[4] * 100 - 6000;
         if (!(keymap[3] & 0x20u)) cents += (int8_t)keymap[5];
@@ -471,32 +492,38 @@ static int lower_sfx(const bank_t *bank, unsigned requested, afx_c_event_t **out
         attack_us = fmax(0.0, (double)sbe32(env)) / scale;
         decay_us = sbe32(env + 4u);
         release_us = fmax(0.0, (double)sbe32(env + 8u)) / scale;
-        decay_level = (int)lround(-20.0 * log10((double)(env[13] ? env[13] : 1u) /
+        decay_level = (int)nearbyint(-20.0 * log10((double)(env[13] ? env[13] : 1u) /
                                                  (double)(env[12] ? env[12] : 1u)) / 3.0103);
         if (decay_level < 0) decay_level = 0; if (decay_level > 31) decay_level = 31;
         zones[index] = (afx_c_zone_t){.sample = *sample, .key_max = 127, .velocity_max = 127,
             .dsp_send = (uint8_t)((keymap[3] & 15u) << 4),
-            .setup_mask = (1u << AFX_FIELD_ENV_AD) | (1u << AFX_FIELD_ENV_DR) | (1u << AFX_FIELD_DIRECT)};
-        zones[index].setup[AFX_FIELD_ENV_AD] = (uint16_t)(envelope_rate((int32_t)lround(attack_us), ar_time_ms) |
-            envelope_rate((int32_t)lround(decay_us / scale), dr_time_ms) << 6);
-        zones[index].setup[AFX_FIELD_ENV_DR] = (uint16_t)(envelope_rate((int32_t)lround(release_us), dr_time_ms) |
+            .setup_mask = (1u << AFX_FIELD_ENV_AD) | (1u << AFX_FIELD_ENV_DR) | (1u << AFX_FIELD_DIRECT) |
+                          AFX_NOTE_PL_MASK};
+        zones[index].setup[AFX_FIELD_ENV_AD] = (uint16_t)(envelope_rate((int32_t)nearbyint(attack_us), ar_time_ms) |
+            (decay_us < 0.0 ? 0 : envelope_rate((int32_t)nearbyint(decay_us / scale), dr_time_ms)) << 6);
+        zones[index].setup[AFX_FIELD_ENV_DR] = (uint16_t)(envelope_rate((int32_t)nearbyint(release_us), dr_time_ms) |
             decay_level << 5 | 15 << 10);
         zones[index].setup[AFX_FIELD_DIRECT] = direct_word(sound.pan);
-        start = (uint32_t)lround((double)cursor_us / 1000.0);
-        events[index * 2u] = (afx_c_event_t){.tick = start, .order = index * 2u, .opcode = AFX_OP_NOTE,
+        /* DKR's live controls scale this per-component baseline, not a NOTE's
+         * pitch/level override. Keep both representations identical. */
+        zones[index].setup[AFX_FIELD_PITCH] = sfx_pitch(sample->sample_rate, cents);
+        zones[index].setup[AFX_FIELD_TOTAL_LEVEL] = sfx_mix(sound.volume, env[12]);
+        start = (uint32_t)nearbyint((double)cursor_us / 1000.0);
+        events[used] = (afx_c_event_t){.tick = start, .order = index + 16u, .opcode = AFX_OP_NOTE,
             .channel = (uint8_t)index, .setup = (uint16_t)index, .mask = AFX_NOTE_PL_MASK};
-        events[index * 2u].fields[AFX_FIELD_PITCH] = sfx_pitch(sample->sample_rate, cents);
-        events[index * 2u].fields[AFX_FIELD_TOTAL_LEVEL] = sfx_mix(sound.volume, env[12]);
-        ratio = pow(2.0, (double)cents / 1200.0);
-        sample_duration = (uint32_t)fmax(1.0, lround((double)sample->frames * 1000.0 / (44100.0 * ratio)));
+        events[used].fields[AFX_FIELD_PITCH] = zones[index].setup[AFX_FIELD_PITCH];
+        events[used++].fields[AFX_FIELD_TOTAL_LEVEL] = zones[index].setup[AFX_FIELD_TOTAL_LEVEL];
+        ratio = pow(2.0, (cents + nearbyint(1200.0 * log2((double)sample->sample_rate / 44100.0))) / 1200.0);
+        sample_duration = (uint32_t)fmax(1.0, nearbyint((double)sample->frames / (44100.0 * ratio) * 1000.0));
         sustain = sample->loop && decay_us < 0.0;
-        if (!sustain) {
-            keyoff = start + (uint32_t)fmax(1.0, lround((attack_us + decay_us / scale) / 1000.0));
-            release = (uint32_t)fmax(1.0, lround(release_us / 1000.0));
-            events[index * 2u + 1u] = (afx_c_event_t){.tick = keyoff, .order = index * 2u + 1u,
+        if (decay_us >= 0.0) {
+            keyoff = start + (uint32_t)fmax(1.0, nearbyint((attack_us + decay_us / scale) / 1000.0));
+            release = (uint32_t)fmax(1.0, nearbyint(release_us / 1000.0));
+            events[used++] = (afx_c_event_t){.tick = keyoff, .order = index,
                 .opcode = AFX_OP_KEYOFF, .channel = (uint8_t)index};
             if (keyoff + release > duration) duration = keyoff + release;
-        } else *out_park = 1;
+        }
+        if (sustain) *out_park = 1;
         if (start + sample_duration > duration) duration = start + sample_duration;
         cursor_us += (uint32_t)keymap[1] * 33333u;
         next = (uint32_t)keymap[0] + ((uint32_t)(keymap[2] & 0xc0u) << 2);
@@ -504,12 +531,12 @@ static int lower_sfx(const bank_t *bank, unsigned requested, afx_c_event_t **out
         *out_zone_count = index + 1u;
     }
     if (!*out_zone_count) goto done;
-    *out_events = events; *out_event_count = *out_zone_count * 2u;
     if (*out_park) {
-        uint32_t used = 0;
-        for (uint32_t i = 0; i < *out_zone_count; ++i) events[used++] = events[i * 2u];
-        *out_event_count = used;
+        duration = 0;
+        for (uint32_t i = 0; i < used; ++i) if (events[i].tick > duration) duration = events[i].tick;
+        events[used++] = (afx_c_event_t){.tick = duration, .order = 32, .opcode = AFX_OP_PARK};
     }
+    *out_events = events; *out_event_count = used;
     *out_duration = duration;
     *out_zones = zones; zones = NULL; events = NULL; status = 0;
 done:
@@ -532,14 +559,7 @@ static int write_sfx(const char *control_path, const char *table_path, const cha
         read_file(table_path, &table, &table_bytes) || bank_open(&bank, control, control_bytes, table, table_bytes, 0) ||
         lower_sfx(&bank, (unsigned)requested, &stream, &events, &duration, &setups, &zones, &park) ||
         afx_c_compile_events(stream, events, duration, 1000, setups, zones, &output)) goto done;
-    if (park) {
-        uint32_t image = afx_read32(output.afx + 16), stream_at = afx_read32(output.afx + 24), stream_bytes = afx_read32(output.afx + 28);
-        if (!stream_bytes || output.afx[image + stream_at + stream_bytes - 1u] != AFX_OP_END) goto done;
-        output.afx[image + stream_at + stream_bytes - 1u] = AFX_OP_PARK;
-        afx_write32(output.afx + 12, afx_read32(output.afx + 12) | AFX_FLAG_CONTROLLED);
-        afx_write32(output.afx + 32, afx_control_id(output.afx + image, afx_read32(output.afx + 20)));
-        free(output.afc); output.afc = NULL; output.afc_bytes = 0;
-    }
+    afx_write32(output.afx + 12, park ? AFX_FLAG_CONTROLLED : 0);
     afb = with_suffix(output_path, ".afb");
     if (!afb || write_file(output_path, output.afx, output.afx_bytes) || write_file(afb, output.afb, output.afb_bytes)) goto done;
     printf("wrote %s (%u components, %s)\n", output_path, zones, park ? "parked" : "one-shot");

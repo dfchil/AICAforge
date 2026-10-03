@@ -509,7 +509,7 @@ int afx_c_visualize(const uint8_t *afx, uint32_t bytes, uint8_t **out_visual, ui
 
 static int assemble_output(const afx_c_zone_t *zones, uint32_t zone_count,
                            const uint8_t *stream, uint32_t stream_bytes,
-                           uint32_t channels, uint32_t tick_rate, afx_c_output_t *out) {
+                           uint32_t channels, uint32_t tick_rate, int controlled, afx_c_output_t *out) {
     uint32_t *offsets = NULL, sample_bytes = 0;
     if (!zones || !zone_count || zone_count > UINT16_MAX || !stream || !stream_bytes ||
         !channels || channels > AFX_MAX_FLOW_CHANNELS || !tick_rate || !out) return -1;
@@ -570,12 +570,12 @@ sample_known:;
     memcpy(setup + zone_count * AFX_SETUP_BYTES, stream, stream_bytes);
     uint32_t control_id = afx_control_id(setup, image_bytes);
     afx_write32(afx, AFX_FILE_MAGIC); afx_write32(afx + 4, AFX_FILE_VERSION); afx_write32(afx + 8, out->afx_bytes);
-    afx_write32(afx + 12, AFX_FLAG_MUSIC); afx_write32(afx + 16, image_at); afx_write32(afx + 20, image_bytes);
+    afx_write32(afx + 12, controlled ? AFX_FLAG_CONTROLLED : AFX_FLAG_MUSIC); afx_write32(afx + 16, image_at); afx_write32(afx + 20, image_bytes);
     afx_write32(afx + 24, zone_count * AFX_SETUP_BYTES); afx_write32(afx + 28, stream_bytes); afx_write32(afx + 32, control_id);
     afx_write32(afx + 36, zone_count); afx_write32(afx + 40, bank_id); afx_write32(afx + 44, afx_read32(out->afb + 12));
     afx_write32(afx + 48, AFX_HEADER); afx_write32(afx + 52, zone_count); afx_write32(afx + 64, channels);
     afx_write32(afx + 68, tick_rate); afx_write32(afx + 72, 1);
-    if (build_seek(out) || afx_c_visualize(out->afx, out->afx_bytes, &out->afv, &out->afv_bytes)) goto failed;
+    if (!controlled && (build_seek(out) || afx_c_visualize(out->afx, out->afx_bytes, &out->afv, &out->afv_bytes))) goto failed;
     free(offsets); return 0;
 failed:
     free(offsets); afx_c_output_free(out); return -1;
@@ -683,6 +683,8 @@ int afx_c_compile_events(const afx_c_event_t *input, uint32_t count,
         } else if (source->opcode == AFX_OP_KEYOFF) {
             if (source->mask) goto failed;
             ++writes;
+        } else if (source->opcode == AFX_OP_PARK) {
+            if (source->mask || !i || i + 1u != count || source->tick != duration_ticks) goto failed;
         } else goto failed;
         ++commands;
         if (commands > AFX_EXECUTION_BUDGET_COMMANDS || writes > AFX_EXECUTION_BUDGET_WRITES) goto failed;
@@ -699,8 +701,9 @@ int afx_c_compile_events(const afx_c_event_t *input, uint32_t count,
         cursor += written;
         if (source->channel + 1u > channels) channels = source->channel + 1u;
     }
-    cursor += encode_wait(stream + cursor, duration_ticks - previous); stream[cursor++] = AFX_OP_END;
-    if (assemble_output(zones, zone_count, stream, cursor, channels, tick_rate, out)) goto failed;
+    int controlled = events[count - 1u].opcode == AFX_OP_PARK;
+    if (!controlled) { cursor += encode_wait(stream + cursor, duration_ticks - previous); stream[cursor++] = AFX_OP_END; }
+    if (assemble_output(zones, zone_count, stream, cursor, channels, tick_rate, controlled, out)) goto failed;
     free(events); free(stream); return 0;
 failed:
     free(events); free(stream); afx_c_output_free(out); return -1;

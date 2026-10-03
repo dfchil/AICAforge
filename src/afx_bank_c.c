@@ -592,10 +592,9 @@ failed:
 /* Merge final AFB+AFX pairs into one bank.  This is deliberately an authoring
  * operation: runtime still sees its one-bank-per-flow ABI. */
 typedef struct {
-    const uint8_t *source, *data;
-    uint8_t *owned;
-    uint32_t source_bytes, bytes, offset;
-    uint8_t source_format, format;
+    const uint8_t *data;
+    uint32_t bytes, offset;
+    uint8_t format;
 } merge_sample_t;
 typedef struct {
     const char *path;
@@ -661,17 +660,12 @@ static void free_merge_flows(merge_flow_t *flows, uint32_t count) {
     free(flows);
 }
 
-static void free_merge_samples(merge_sample_t *samples, uint32_t count) {
-    for (uint32_t i = 0; i < count; ++i) free(samples[i].owned);
-    free(samples);
-}
-
 static int merge_sample_for(const uint8_t *data, uint32_t bytes, uint8_t format,
                             merge_sample_t **samples, uint32_t *count, uint32_t *capacity,
                             uint32_t *out) {
     for (uint32_t i = 0; i < *count; ++i)
-        if ((*samples)[i].source_bytes == bytes && (*samples)[i].source_format == format &&
-            !memcmp((*samples)[i].source, data, bytes)) {
+        if ((*samples)[i].bytes == bytes && (*samples)[i].format == format &&
+            !memcmp((*samples)[i].data, data, bytes)) {
             *out = i; return 0;
         }
     if (*count == *capacity) {
@@ -680,12 +674,9 @@ static int merge_sample_for(const uint8_t *data, uint32_t bytes, uint8_t format,
         if (!grown) return -1;
         *samples = grown; *capacity = next;
     }
-    uint8_t *encoded = NULL, encoded_format = format;
-    uint32_t encoded_bytes = bytes;
-    if (format == AFX_PCM16 &&
-        afx_c_encode_sample(data, bytes / 2u, 0, AFX_SAMPLE_AUTO, &encoded, &encoded_bytes, &encoded_format)) return -1;
-    (*samples)[*count] = (merge_sample_t){data, encoded ? encoded : data, encoded,
-                                          bytes, encoded_bytes, 0, format, encoded_format};
+    /* These are final samples: merging must preserve the author's coding,
+     * quality gate and loop representation, not choose a new encoding. */
+    (*samples)[*count] = (merge_sample_t){data, bytes, 0, format};
     *out = (*count)++;
     return 0;
 }
@@ -707,7 +698,7 @@ static int collect_merge_samples(merge_flow_t *flows, uint32_t flow_count,
                 offset > payload || bytes > payload - offset ||
                 merge_sample_for(flow->afb + AFX_BANK_HEADER_BYTES + offset, bytes, format,
                                  &samples, &count, &capacity, flow->sample_for_setup + setup)) {
-                free_merge_samples(samples, count); return -1;
+                free(samples); return -1;
             }
         }
     }
@@ -807,7 +798,7 @@ static int merge_final_banks(const char *bank_path, const char *controls_dir, in
     result = 0;
 done:
     if (result) fprintf(stderr, "cannot merge final AFB/AFX inputs\n");
-    free(bank); free_merge_samples(samples, sample_count); free_merge_flows(flows, flow_count); return result;
+    free(bank); free(samples); free_merge_flows(flows, flow_count); return result;
 }
 
 int main(int argc, char **argv) {

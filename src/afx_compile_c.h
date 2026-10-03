@@ -103,7 +103,9 @@ int afx_c_compile_zones(const afx_c_note_t *notes, uint32_t count,
                         uint32_t zone_count, afx_c_output_t *out);
 
 /* Assemble a bank-bound AFX from already-resolved NOTE, PATCH and KEYOFF
- * events.  `duration_ticks` is the source's final control tick. */
+ * events. `duration_ticks` is the source's final control tick.
+ * An optional final PARK at duration_ticks emits a controlled flow without
+ * song-only seek/visual sidecars, including a NOTE/PARK at tick zero. */
 int afx_c_compile_events(const afx_c_event_t *events, uint32_t count,
                          uint32_t duration_ticks, uint32_t tick_rate,
                          const afx_c_zone_t *zones, uint32_t zone_count,
