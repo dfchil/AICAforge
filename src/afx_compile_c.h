@@ -17,6 +17,21 @@ typedef struct {
     /* Zero uses the compiler's ordinary MIDI-velocity curve. Importers may
      * lower a source instrument's velocity law to an exact AICA MIX word. */
     uint16_t mix;
+    /* KEYOFF time. Zero means end_tick. A later end_tick reserves the AICA
+     * channel through a release tail without adding a runtime command. */
+    uint32_t release_tick;
+    /* MIDI controller state sampled at NOTE-on. It is authoring input only:
+     * SoundFont lowering turns it into ordinary NOTE pitch/MIX values.
+     * `controllers_valid` keeps hand-authored C notes source-compatible. */
+    uint64_t controller_state;
+    /* The complete CC snapshot and pressure values are likewise offline-only.
+     * SF2 pmod/imod graphs may reference any MIDI controller at NOTE-on; no
+     * controller or SoundFont state reaches AICA. */
+    uint8_t controllers[128], poly_pressure, channel_pressure, pitch_sensitivity;
+    /* Source identity is retained only while authoring.  It lets deterministic
+     * offline performance transforms remain stable when a score is rebuilt. */
+    uint32_t source_id, source_track, source_order, source_tick;
+    int16_t attenuation_offset_centibels;
 } afx_c_note_t;
 
 typedef struct {
@@ -51,11 +66,42 @@ typedef struct {
     uint16_t setup[AFX_FIELD_COUNT];
 } afx_c_zone_t;
 
+/* A resolved control-stream event for importers whose source has live register
+ * writes (for example MultiPCM). `fields` is indexed by AFX_FIELD_*; only
+ * bits selected by `mask` are emitted.  NOTE setup indices are zero-based. */
+typedef struct {
+    uint32_t tick, order, mask;
+    uint16_t setup;
+    uint8_t opcode, channel;
+    uint16_t fields[AFX_FIELD_COUNT];
+} afx_c_event_t;
+
+/* Normalize source-specific NOTE events into a compact setup dictionary.
+ * Input NOTE events must carry PITCH and MIX; the function returns owned
+ * event/template arrays for the common emitter.  Non-NOTE events are copied.
+ */
+int afx_c_optimize_events(const afx_c_event_t *events, uint32_t count,
+                          const afx_c_zone_t *zones, uint32_t zone_count,
+                          afx_c_event_t **out_events, afx_c_zone_t **out_zones,
+                          uint32_t *out_zone_count);
+
+/* Apply a source's explicit NOTE cluster policy before common emission.
+ * `cluster_limit` is commands per control tick (1..38); note lifetimes move
+ * together by whole ticks, so no timing is silently shortened. */
+int afx_c_schedule_notes(afx_c_note_t *notes, uint32_t count, uint8_t cluster_limit);
+
 /* Every note must select exactly one key range. The zones become the AFB's
  * contiguous, 32-byte aligned samples and the AFX setup dictionary. */
 int afx_c_compile_zones(const afx_c_note_t *notes, uint32_t count,
                         uint32_t tick_rate, const afx_c_zone_t *zones,
                         uint32_t zone_count, afx_c_output_t *out);
+
+/* Assemble a bank-bound AFX from already-resolved NOTE, PATCH and KEYOFF
+ * events.  `duration_ticks` is the source's final control tick. */
+int afx_c_compile_events(const afx_c_event_t *events, uint32_t count,
+                         uint32_t duration_ticks, uint32_t tick_rate,
+                         const afx_c_zone_t *zones, uint32_t zone_count,
+                         afx_c_output_t *out);
 
 /* Compile a resolved timeline against one explicit sample. All output sidecars
  * are allocated with the AFB/AFX pair and released by afx_c_output_free(). */
@@ -67,6 +113,11 @@ int afx_c_compile_sample(const afx_c_note_t *notes, uint32_t count,
  * sine source. The caller owns out through afx_c_output_free(). */
 int afx_c_compile_sine(const afx_c_note_t *notes, uint32_t count,
                        uint32_t tick_rate, afx_c_output_t *out);
+/* Make a VIZ1 sidecar from the final AFX command stream.  This deliberately
+ * follows emitted NOTE, PATCH and KEYOFF commands rather than a parallel MIDI
+ * approximation, so it remains aligned with offline AFP transforms. */
+int afx_c_visualize(const uint8_t *afx, uint32_t bytes,
+                    uint8_t **out_visual, uint32_t *out_bytes);
 void afx_c_output_free(afx_c_output_t *out);
 
 #endif

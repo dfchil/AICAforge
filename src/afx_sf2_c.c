@@ -8,7 +8,7 @@
 #include <string.h>
 
 enum {
-    PHDR_BYTES = 38, BAG_BYTES = 4, GEN_BYTES = 4, INST_BYTES = 22,
+    PHDR_BYTES = 38, BAG_BYTES = 4, GEN_BYTES = 4, MOD_BYTES = 10, INST_BYTES = 22,
     SHDR_BYTES = 46, GEN_INITIAL_FILTER_FC = 8, GEN_INITIAL_FILTER_Q = 9,
     GEN_MOD_ENV_TO_FILTER_FC = 11, GEN_REVERB_SEND = 16, GEN_PAN = 17,
     GEN_MOD_ENV_ATTACK = 26, GEN_MOD_ENV_DECAY = 28, GEN_MOD_ENV_SUSTAIN = 29,
@@ -24,11 +24,12 @@ enum { CTRL_FILTER_FC, CTRL_FILTER_Q, CTRL_MOD_FILTER, CTRL_MOD_ATTACK,
        CTRL_MOD_DECAY, CTRL_MOD_SUSTAIN, CTRL_MOD_RELEASE, CTRL_MOD_KEY_DECAY,
        CTRL_VOL_ATTACK, CTRL_VOL_DECAY, CTRL_VOL_SUSTAIN, CTRL_VOL_RELEASE,
        CTRL_ATTENUATION, CTRL_PAN, CTRL_REVERB, CTRL_COUNT };
+enum { MODULATOR_MAX = 48 };
 
 typedef struct {
-    const uint8_t *smpl, *phdr, *pbag, *pgen, *inst, *ibag, *igen, *shdr;
+    const uint8_t *smpl, *phdr, *pbag, *pmod, *pgen, *inst, *ibag, *imod, *igen, *shdr;
     uint32_t smpl_frames, phdr_count, pbag_count, pgen_count, inst_count,
-             ibag_count, igen_count, shdr_count;
+             pmod_count, ibag_count, igen_count, imod_count, shdr_count;
 } sf2_t;
 
 typedef struct {
@@ -36,7 +37,19 @@ typedef struct {
     int key_lo, key_hi, velocity_lo, velocity_hi, coarse, fine;
     uint32_t controls_mask;
     int controls[CTRL_COUNT];
+    int velocity_attenuation_amount, velocity_filter_amount;
 } controls_t;
+
+typedef struct {
+    uint16_t source, destination, amount_source, transform;
+    int16_t amount;
+} modulator_t;
+
+typedef struct {
+    int velocity_attenuation_amount, velocity_filter_amount;
+    modulator_t items[MODULATOR_MAX];
+    uint8_t count;
+} modulators_t;
 
 typedef struct {
     uint8_t *data;
@@ -52,8 +65,7 @@ typedef struct {
     uint32_t decoded_count;
     const sf2_t *font;
     const afx_c_note_t *source;
-    uint8_t sample_format;
-    uint8_t channel;
+    const afx_c_sf2_options_t *options;
     int matched;
 } resolver_t;
 
@@ -117,17 +129,21 @@ static int load_font(const uint8_t *data, uint32_t bytes, sf2_t *font) {
     if (find_chunk(sdta, sdta_bytes, "smpl", &font->smpl, &chunk_bytes) || (chunk_bytes & 1u) ||
         find_chunk(pdta, pdta_bytes, "phdr", &font->phdr, &chunk_bytes) || chunk_bytes % PHDR_BYTES ||
         find_chunk(pdta, pdta_bytes, "pbag", &font->pbag, &chunk_bytes) || chunk_bytes % BAG_BYTES ||
+        find_chunk(pdta, pdta_bytes, "pmod", &font->pmod, &chunk_bytes) || chunk_bytes % MOD_BYTES ||
         find_chunk(pdta, pdta_bytes, "pgen", &font->pgen, &chunk_bytes) || chunk_bytes % GEN_BYTES ||
         find_chunk(pdta, pdta_bytes, "inst", &font->inst, &chunk_bytes) || chunk_bytes % INST_BYTES ||
         find_chunk(pdta, pdta_bytes, "ibag", &font->ibag, &chunk_bytes) || chunk_bytes % BAG_BYTES ||
+        find_chunk(pdta, pdta_bytes, "imod", &font->imod, &chunk_bytes) || chunk_bytes % MOD_BYTES ||
         find_chunk(pdta, pdta_bytes, "igen", &font->igen, &chunk_bytes) || chunk_bytes % GEN_BYTES ||
         find_chunk(pdta, pdta_bytes, "shdr", &font->shdr, &chunk_bytes) || chunk_bytes % SHDR_BYTES) return -1;
     find_chunk(sdta, sdta_bytes, "smpl", &font->smpl, &chunk_bytes); font->smpl_frames = chunk_bytes / 2u;
     find_chunk(pdta, pdta_bytes, "phdr", &font->phdr, &chunk_bytes); font->phdr_count = chunk_bytes / PHDR_BYTES;
     find_chunk(pdta, pdta_bytes, "pbag", &font->pbag, &chunk_bytes); font->pbag_count = chunk_bytes / BAG_BYTES;
+    find_chunk(pdta, pdta_bytes, "pmod", &font->pmod, &chunk_bytes); font->pmod_count = chunk_bytes / MOD_BYTES;
     find_chunk(pdta, pdta_bytes, "pgen", &font->pgen, &chunk_bytes); font->pgen_count = chunk_bytes / GEN_BYTES;
     find_chunk(pdta, pdta_bytes, "inst", &font->inst, &chunk_bytes); font->inst_count = chunk_bytes / INST_BYTES;
     find_chunk(pdta, pdta_bytes, "ibag", &font->ibag, &chunk_bytes); font->ibag_count = chunk_bytes / BAG_BYTES;
+    find_chunk(pdta, pdta_bytes, "imod", &font->imod, &chunk_bytes); font->imod_count = chunk_bytes / MOD_BYTES;
     find_chunk(pdta, pdta_bytes, "igen", &font->igen, &chunk_bytes); font->igen_count = chunk_bytes / GEN_BYTES;
     find_chunk(pdta, pdta_bytes, "shdr", &font->shdr, &chunk_bytes); font->shdr_count = chunk_bytes / SHDR_BYTES;
     return font->phdr_count > 1 && font->pbag_count > 1 && font->inst_count > 1 &&
@@ -232,6 +248,112 @@ static controls_t add_controls(controls_t base, const controls_t *local) {
     return out;
 }
 
+/* These are the two standard SF2 modulators whose results AICA can lower
+ * exactly into a NOTE's gain and filter setup.  Other arbitrary SF2 graphs
+ * deliberately remain outside this compact offline reader. */
+static int modulator_store(modulators_t *out, const modulator_t *item) {
+    for (uint32_t i = 0; i < out->count; ++i)
+        if (out->items[i].source == item->source && out->items[i].destination == item->destination &&
+            out->items[i].amount_source == item->amount_source && out->items[i].transform == item->transform) {
+            out->items[i] = *item; return 0;
+        }
+    if (out->count == MODULATOR_MAX) return -1;
+    out->items[out->count++] = *item; return 0;
+}
+
+static int modulator_append(modulators_t *out, const modulators_t *items) {
+    for (uint32_t i = 0; i < items->count; ++i) {
+        if (out->count == MODULATOR_MAX) return -1;
+        out->items[out->count++] = items->items[i];
+    }
+    return 0;
+}
+
+static int modulator_override(const uint8_t *mods, uint32_t mod_count,
+                               const uint8_t *bags, uint32_t bag, uint32_t bag_count,
+                               modulators_t *out) {
+    if (!mods || !bags || !out || bag + 1u >= bag_count) return -1;
+    uint32_t first = le16(bags + bag * BAG_BYTES + 2),
+             last = le16(bags + (bag + 1u) * BAG_BYTES + 2);
+    if (first > last || last > mod_count) return -1;
+    for (uint32_t i = first; i < last; ++i) {
+        const uint8_t *mod = mods + i * MOD_BYTES;
+        uint16_t source = le16(mod), destination = le16(mod + 2),
+                 amount_source = le16(mod + 6), transform = le16(mod + 8);
+        int amount = sle16(mod + 4);
+        modulator_t item = {source, destination, amount_source, transform, (int16_t)amount};
+        if (!amount_source && !transform && source == 1282 && destination == GEN_INITIAL_ATTENUATION)
+            out->velocity_attenuation_amount = amount;
+        else if (!amount_source && !transform && source == 258 && destination == GEN_INITIAL_FILTER_FC)
+            out->velocity_filter_amount = amount;
+        else if (amount && modulator_store(out, &item)) return -1;
+    }
+    return 0;
+}
+
+/* AFBM chooses whether a source's graph participates. The result is sampled
+ * once at NOTE-on and lowered into the existing setup dictionary; no SF2 or
+ * MIDI state reaches the console. Curved and LFO sources are time functions,
+ * so this static path deliberately does not guess at them. */
+static int modulator_source(const afx_c_note_t *note, uint16_t source, double *out) {
+    unsigned index = source & 0x7fu, curve = source >> 10;
+    double value;
+    if (curve || (!index && !(source & 0x80u))) return 0;
+    if (source & 0x80u) value = note->controllers[index] / 127.0;
+    else switch (index) {
+        case 2: value = note->velocity / 127.0; break;
+        case 3: value = note->key / 127.0; break;
+        case 10: value = note->poly_pressure / 127.0; break;
+        case 13: value = note->channel_pressure / 127.0; break;
+        case 14: value = ((note->controller_state >> 25) & 16383u) / 16383.0; break;
+        case 16: value = note->pitch_sensitivity / 127.0; break;
+        default: return 0;
+    }
+    if (source & 0x100u) value = 1.0 - value;
+    if (source & 0x200u) value = 2.0 * value - 1.0;
+    *out = value; return 1;
+}
+
+static void control_add(controls_t *out, unsigned id, int delta) {
+    control_set(out, id, control_get(out, id, control_default(id)) + delta);
+}
+
+static void apply_modulators(controls_t *out, const afx_c_note_t *note,
+                             const modulators_t *modulators, int enabled) {
+    if (!enabled) return;
+    for (uint32_t i = 0; i < modulators->count; ++i) {
+        const modulator_t *item = modulators->items + i;
+        double source, amount = 1.0;
+        int delta;
+        /* The two standard velocity rules retain their higher-fidelity SF2
+         * curve in sf2_mix/lower_zone. */
+        if ((item->source == 1282 && item->destination == GEN_INITIAL_ATTENUATION) ||
+            (item->source == 258 && item->destination == GEN_INITIAL_FILTER_FC) || item->transform ||
+            ((item->source == 135 || item->source == 139) && item->destination == GEN_INITIAL_ATTENUATION) ||
+            (item->source == 138 && item->destination == GEN_PAN) ||
+            !modulator_source(note, item->source, &source) ||
+            (item->amount_source && !modulator_source(note, item->amount_source, &amount))) continue;
+        delta = (int)lround(item->amount * source * amount);
+        switch (item->destination) {
+            case GEN_INITIAL_FILTER_FC: control_add(out, CTRL_FILTER_FC, delta); break;
+            case GEN_MOD_ENV_TO_FILTER_FC: control_add(out, CTRL_MOD_FILTER, delta); break;
+            case GEN_REVERB_SEND: control_add(out, CTRL_REVERB, delta); break;
+            case GEN_PAN: control_add(out, CTRL_PAN, delta); break;
+            case GEN_MOD_ENV_ATTACK: control_add(out, CTRL_MOD_ATTACK, delta); break;
+            case GEN_MOD_ENV_DECAY: control_add(out, CTRL_MOD_DECAY, delta); break;
+            case GEN_MOD_ENV_SUSTAIN: control_add(out, CTRL_MOD_SUSTAIN, delta); break;
+            case GEN_MOD_ENV_RELEASE: control_add(out, CTRL_MOD_RELEASE, delta); break;
+            case GEN_VOL_ENV_ATTACK: control_add(out, CTRL_VOL_ATTACK, delta); break;
+            case GEN_VOL_ENV_DECAY: control_add(out, CTRL_VOL_DECAY, delta); break;
+            case GEN_VOL_ENV_SUSTAIN: control_add(out, CTRL_VOL_SUSTAIN, delta); break;
+            case GEN_VOL_ENV_RELEASE: control_add(out, CTRL_VOL_RELEASE, delta); break;
+            case GEN_INITIAL_ATTENUATION: control_add(out, CTRL_ATTENUATION, delta); break;
+            case GEN_COARSE_TUNE: out->coarse += delta; break;
+            case GEN_FINE_TUNE: out->fine += delta; break;
+        }
+    }
+}
+
 static int matches(const controls_t *controls, const afx_c_note_t *note) {
     return controls->key_lo <= note->key && note->key <= controls->key_hi &&
            controls->velocity_lo <= note->velocity && note->velocity <= controls->velocity_hi;
@@ -241,47 +363,108 @@ static int ensure_sample(resolver_t *resolver, const controls_t *controls, uint3
                          afx_c_sample_t *out) {
     const sf2_t *font = resolver->font;
     if (sample_id >= resolver->decoded_count) return -1;
-    decoded_t *decoded = resolver->decoded + sample_id;
+    const uint8_t *header = font->shdr + sample_id * SHDR_BYTES;
+    uint32_t start = le32(header + 20), end = le32(header + 24), loop_start = le32(header + 28),
+             loop_end = le32(header + 32), rate = le32(header + 36);
+    if (!rate || start >= end || end > font->smpl_frames || (le16(header + 44) & 0x8000u)) return -1;
+    int source_loop = loop_start >= start && loop_start < loop_end && loop_end <= end;
+    int keep_loop = (controls->mode & 1) && source_loop;
+    /* A looped and a one-shot use of one SF2 sample need independent cached
+     * encodings: only the looped form may discard its post-loop tail. */
+    decoded_t *decoded = resolver->decoded + sample_id * 2u + (unsigned)keep_loop;
     if (!decoded->ready) {
-        const uint8_t *header = font->shdr + sample_id * SHDR_BYTES;
-        uint32_t start = le32(header + 20), end = le32(header + 24), loop_start = le32(header + 28),
-                 loop_end = le32(header + 32), rate = le32(header + 36);
-        if (!rate || start >= end || end > font->smpl_frames || (le16(header + 44) & 0x8000u)) return -1;
-        uint32_t source_frames = end - start, step = (source_frames + 65534u) / 65535u;
-        uint32_t frames = (source_frames + step - 1u) / step;
-        uint8_t *pcm16 = malloc((size_t)frames * 2u), *encoded = NULL, format = 0;
+        uint32_t source_frames = end - start;
+        uint64_t wanted_rate = rate;
+        if (resolver->options->sample_rate_cap && wanted_rate > resolver->options->sample_rate_cap)
+            wanted_rate = resolver->options->sample_rate_cap;
+        /* Match the established offline layout, not merely AICA's raw
+         * register maximum. One-shots append a 256-frame silent safety tail;
+         * looped sources retain a small rounding margin around LEA. */
+        uint32_t frame_cap = keep_loop ? 65500u : 65279u;
+        if ((uint64_t)source_frames * wanted_rate > frame_cap * (uint64_t)rate)
+            wanted_rate = (uint64_t)frame_cap * rate / source_frames;
+        if (!wanted_rate) return -1;
+        uint8_t *pcm16 = NULL, *encoded = NULL, format = 0;
+        uint32_t frames = 0;
         uint32_t encoded_bytes = 0;
-        if (!pcm16) return -1;
-        for (uint32_t i = 0; i < frames; ++i) {
-            const uint8_t *source = font->smpl + 2u * (start + i * step);
-            pcm16[2u * i] = source[0]; pcm16[2u * i + 1u] = source[1];
-        }
-        uint32_t local_start = loop_start > start ? (loop_start - start) / step : 0;
-        uint32_t local_end = loop_end > start ? (loop_end - start) / step : 0;
+        if (afx_c_resample_pcm16(font->smpl + 2u * start, source_frames, rate,
+                                 (uint32_t)wanted_rate, &pcm16, &frames) || frames > 65535u) return -1;
+        uint32_t local_start = loop_start > start ? (uint32_t)nearbyint((double)(loop_start - start) * wanted_rate / rate) : 0;
+        uint32_t local_end = loop_end > start ? (uint32_t)nearbyint((double)(loop_end - start) * wanted_rate / rate) : 0;
         int loop_capable = local_start < local_end && local_end <= frames;
+        if (keep_loop && loop_capable && resolver->options->loop_ms &&
+            frames > (uint64_t)wanted_rate * resolver->options->loop_ms / 1000u) {
+            uint32_t target = local_start + (uint32_t)((uint64_t)wanted_rate * resolver->options->loop_ms / 1000u);
+            uint32_t margin = (uint32_t)((uint64_t)wanted_rate * resolver->options->loop_ms / 4000u);
+            uint32_t low, high, best, best_cost;
+            if (target > local_end) target = local_end;
+            low = target > margin ? target - margin : 0;
+            if (low < local_start + 2u) low = local_start + 2u;
+            high = target > UINT32_MAX - margin ? local_end : target + margin;
+            if (high > local_end) high = local_end;
+            if (low <= high) {
+                int first = (int16_t)((uint16_t)pcm16[2u * local_start] | (uint16_t)pcm16[2u * local_start + 1u] << 8);
+                int second = (int16_t)((uint16_t)pcm16[2u * (local_start + 1u)] | (uint16_t)pcm16[2u * (local_start + 1u) + 1u] << 8);
+                best = low; best_cost = UINT32_MAX;
+                for (uint32_t frame = low; frame <= high; ++frame) {
+                    int previous = (int16_t)((uint16_t)pcm16[2u * (frame - 1u)] | (uint16_t)pcm16[2u * (frame - 1u) + 1u] << 8);
+                    int before = (int16_t)((uint16_t)pcm16[2u * (frame - 2u)] | (uint16_t)pcm16[2u * (frame - 2u) + 1u] << 8);
+                    uint32_t cost = (uint32_t)abs(previous - first) + (uint32_t)abs((previous - before) - (second - first));
+                    if (cost < best_cost) { best = frame; best_cost = cost; }
+                }
+                local_end = best;
+            }
+        }
+        if (keep_loop && loop_capable) {
+            /* AICA re-enters at the supplied loop point, so samples following
+             * it are unreachable. Keeping them was the reason the C export of
+             * the licensed solo cello exceeded AICA RAM. */
+            frames = local_end;
+        }
         /* A source with a legal loop must not receive automatic ADPCM: a later
          * SF2 zone may turn that loop on, and AICA's predictor seam needs an
          * explicit capture test. */
-        if (afx_c_encode_sample(pcm16, frames, loop_capable, resolver->sample_format,
+        if (!keep_loop) {
+            uint32_t fade, original_frames = frames;
+            uint8_t *tailed;
+            if (frames > 65535u - 256u) { free(pcm16); return -1; }
+            tailed = realloc(pcm16, (size_t)(frames + 256u) * 2u);
+            if (!tailed) { free(pcm16); return -1; }
+            pcm16 = tailed; memset(pcm16 + frames * 2u, 0, 512u);
+            fade = frames < wanted_rate / 5u ? frames : (uint32_t)(wanted_rate / 5u);
+            if (!fade) fade = 1;
+            for (uint32_t frame = 0; frame < fade; ++frame) {
+                uint32_t offset = 2u * (original_frames - fade + frame);
+                int value = (int16_t)((uint16_t)pcm16[offset] | (uint16_t)pcm16[offset + 1u] << 8);
+                value = (int)lround((double)value * (fade - frame - 1u) / fade);
+                pcm16[offset] = (uint8_t)value; pcm16[offset + 1u] = (uint8_t)(value >> 8);
+            }
+            local_start = original_frames; local_end = original_frames + 255u;
+            frames += 256u;
+        }
+        if (afx_c_encode_sample(pcm16, frames, keep_loop && loop_capable, resolver->options->sample_format,
                                 &encoded, &encoded_bytes, &format)) {
             free(pcm16); return -1;
         }
         free(pcm16);
-        int rate_tune = (int)lrint(1200.0 * log2(44100.0 * step / rate));
-        int tuning = (int)(int8_t)header[41] + rate_tune;
+        uint32_t output_rate = (uint32_t)wanted_rate;
+        /* sample_rate is retained in the AFB and the common pitch lowering
+         * compensates it once.  Baking rate_tune here as well transposes every
+         * resampled sample by a second, erroneous factor. */
+        int tuning = (int)(int8_t)header[41];
         if (tuning < INT16_MIN || tuning > INT16_MAX) { free(encoded); return -1; }
         decoded->data = encoded;
         decoded->sample = (afx_c_sample_t){encoded, encoded_bytes, frames, format,
                                            header[40] <= 127 ? header[40] : 60,
-                                           0, 0, (uint16_t)(frames - 1u),
-                                           (int16_t)tuning, rate / step};
+                                           1u, local_start, local_end,
+                                           (int16_t)tuning, output_rate};
         decoded->loop_start = (uint16_t)local_start;
         decoded->loop_end = (uint16_t)(loop_capable ? local_end - 1u : 0);
         decoded->loop_capable = loop_capable;
         decoded->ready = 1;
     }
     *out = decoded->sample;
-    if ((controls->mode & 1) && decoded->loop_capable) {
+    if (keep_loop && decoded->loop_capable) {
         out->loop = 1; out->loop_start = decoded->loop_start; out->loop_end = decoded->loop_end;
     }
     if (controls->root >= 0) out->root_key = (uint8_t)controls->root;
@@ -308,20 +491,26 @@ static int aica_rate(int timecents, const double table[64]) {
     return best;
 }
 
-static uint16_t filter_level(int cents) {
+static uint16_t filter_level(double cents) {
     double frequency = 8.176 * pow(2.0, fmax(-16000, fmin(16000, cents)) / 1200.0);
     double coefficient, mantissa;
     int exponent;
     if (frequency < 20) frequency = 20;
-    if (frequency > 18000) frequency = 18000;
+    /* AICA's FEG level is a 13-bit word.  Above the useful audio range the
+       SF2 default is an open filter, not a value with bit 13 set. */
+    if (frequency >= 18000) return 0x1ff7;
     coefficient = 2.0 * sin(acos(-1.0) * frequency / 44100.0);
     exponent = (int)floor(log2(coefficient)) + 16;
     if (exponent < 0) exponent = 0;
     if (exponent > 15) exponent = 15;
-    mantissa = round(coefficient * pow(2.0, 25 - exponent));
+    /* Python's reference author uses round(), i.e. IEEE ties-to-even.  Keep
+       the default floating-point rounding mode here so an AFBM lowered by C
+       produces the same cutoff word instead of an adjacent FEG level. */
+    mantissa = nearbyint(coefficient * pow(2.0, 25 - exponent));
     if (mantissa < 0) mantissa = 0;
     if (mantissa > 0x1ff7) mantissa = 0x1ff7;
-    return (uint16_t)(exponent * 512 + (int)mantissa - 512);
+    int level = exponent * 512 + (int)mantissa - 512;
+    return (uint16_t)(level > 0x1ff7 ? 0x1ff7 : level);
 }
 
 static int filter_rate(int timecents, int distance) {
@@ -334,40 +523,74 @@ static int filter_rate(int timecents, int distance) {
     return best;
 }
 
-static uint16_t sf2_mix(const controls_t *controls, uint8_t velocity) {
+/* SF2 source pan and MIDI channel pan are one combined stereo position.  The
+ * MIDI reader snapshots CC10 at NOTE-on, so lowering remains entirely
+ * offline.  `source_pan=ignore` deliberately suppresses both, matching the
+ * explicit map policy rather than silently keeping MIDI pan. */
+static int sf2_pan(const controls_t *controls, const afx_c_note_t *note,
+                   const afx_c_sf2_options_t *options) {
     int pan = control_get(controls, CTRL_PAN, 0);
-    double angle, loud, source, velocity_attenuation, pan_attenuation, attenuation;
+    if (options->source_pan && note->controller_state >> 39) {
+        int channel_pan = (int)((note->controller_state >> 18) & 127u);
+        pan += (int)lround((channel_pan - 64) * 500.0 / 63.0);
+    }
     if (pan < -500) pan = -500;
     if (pan > 500) pan = 500;
+    return pan;
+}
+
+static uint16_t sf2_mix(const controls_t *controls, const afx_c_note_t *note,
+                        const afx_c_sf2_options_t *options) {
+    int pan = sf2_pan(controls, note, options);
+    double angle, loud, source, velocity_attenuation, pan_attenuation, attenuation;
     angle = (pan + 500) * acos(-1.0) / 2000.0;
     loud = fmax(cos(angle), sin(angle));
-    source = control_get(controls, CTRL_ATTENUATION, 0) * 4.0;
+    /* SF2 initialAttenuation is already expressed in centibels.  Applying
+       the legacy E-mu 0.04 dB scaling here turns quiet string zones into
+       effectively muted AICA voices. */
+    source = control_get(controls, CTRL_ATTENUATION, 0) *
+             (options->gain_model == AFX_C_SF2_GAIN_FLUIDSYNTH2 ? 4.0 : 1.0);
     /* FluidSynth's standard SF2 velocity modulator is -40 log10(v/127) dB. */
-    velocity_attenuation = -4000.0 * log10((double)velocity / 127.0);
+    velocity_attenuation = -4000.0 * log10((double)note->velocity / 127.0);
+    if (options->gain_model == AFX_C_SF2_GAIN_FLUIDSYNTH2)
+        velocity_attenuation *= controls->velocity_attenuation_amount / 960.0;
     pan_attenuation = -2000.0 * log10(loud * sqrt(2.0));
-    attenuation = source + velocity_attenuation + pan_attenuation;
+    attenuation = options->gain_bias_centibels + note->attenuation_offset_centibels + source +
+                  velocity_attenuation + pan_attenuation;
+    /* SF2's default volume and expression modulators are controller state at
+     * NOTE-on. Later automation is lowered separately as PATCH commands. */
+    if (note->controller_state >> 39) {
+        unsigned volume = (note->controller_state >> 4) & 127u;
+        unsigned expression = (note->controller_state >> 11) & 127u;
+        if (!volume || !expression) attenuation = 10200.0;
+        else attenuation += (options->gain_model == AFX_C_SF2_GAIN_FLUIDSYNTH2 ? 2.0 : 1.0) *
+                            -2000.0 * log10((double)volume * expression / (127.0 * 127.0));
+    }
     /* Convert the SF2 centibel model to AICA's TL calibration. */
     int tl = (int)lround(attenuation / (2000.0 * log10(2.0) / 16.0));
     if (tl < 0) tl = 0;
     if (tl > 255) tl = 255;
-    return (uint16_t)(tl << 8 | 0x24);
+    int lpf = options->gain_model == AFX_C_SF2_GAIN_FLUIDSYNTH2 ?
+              (int)lround(control_get(controls, CTRL_FILTER_Q, 0) / 7.5 + 4.0) : 0x24;
+    if (lpf < 0) lpf = 0;
+    if (lpf > 15) lpf = 15;
+    return (uint16_t)(tl << 8 | lpf);
 }
 
 static afx_c_zone_t lower_zone(const afx_c_sample_t *sample, const controls_t *controls,
-                                const afx_c_note_t *note) {
-    int pan = control_get(controls, CTRL_PAN, 0);
-    int q = (int)lround(control_get(controls, CTRL_FILTER_Q, 0) / 7.5) + 4;
-    int cutoff = control_get(controls, CTRL_FILTER_FC, 13500);
+                                const afx_c_note_t *note, const afx_c_sf2_options_t *options) {
+    int pan = sf2_pan(controls, note, options);
+    /* SF2's velocity-to-filter modulator is fractional.  Keep it fractional
+       until it becomes AICA's cutoff word: the Python reference does this
+       too, and truncating here changes selected FEG values by one. */
+    double cutoff = control_get(controls, CTRL_FILTER_FC, 13500) + options->filter_offset_cents +
+                    (double)controls->velocity_filter_amount * (127 - note->velocity) / 128.0;
     int mod_filter = control_get(controls, CTRL_MOD_FILTER, 0);
     int sustain = control_get(controls, CTRL_MOD_SUSTAIN, 0);
-    int peak = cutoff + mod_filter;
-    int filter_sustain = cutoff + (int)lround(mod_filter * (1.0 - fmin(1000, fmax(0, sustain)) / 1000.0));
+    double peak = cutoff + mod_filter;
+    double filter_sustain = cutoff + mod_filter * (1.0 - fmin(1000, fmax(0, sustain)) / 1000.0);
     int vol_sustain = control_get(controls, CTRL_VOL_SUSTAIN, 0);
     int dl = (int)lround(vol_sustain / (100.0 * log10(2.0)));
-    if (pan < -500) pan = -500;
-    if (pan > 500) pan = 500;
-    if (q < 0) q = 0;
-    if (q > 15) q = 15;
     if (dl < 0) dl = 0;
     if (dl > 31) dl = 31;
     double angle = (pan + 500) * acos(-1.0) / 2000.0;
@@ -377,24 +600,49 @@ static afx_c_zone_t lower_zone(const afx_c_sample_t *sample, const controls_t *c
     afx_c_zone_t zone = {.sample = *sample, .key_min = 0, .key_max = 127,
         .velocity_min = 0, .velocity_max = 127, .bank_msb = note->bank_msb,
         .bank_lsb = note->bank_lsb, .program = note->program,
-        .dsp_send = (uint8_t)(fmin(1000, fmax(0, control_get(controls, CTRL_REVERB, 0))) * 15 / 1000) << 4};
-    zone.setup_mask = (1u << AFX_FIELD_ENV_AD) | (1u << AFX_FIELD_ENV_DR) |
-                      (1u << AFX_FIELD_DIRECT) |
+        .dsp_send = options->has_dsp_send ? options->dsp_send :
+                    (options->source_reverb ? (uint8_t)(fmin(1000, fmax(0, control_get(controls, CTRL_REVERB, 0))) * 15 / 1000) << 4 : 0)};
+    zone.setup_mask = (1u << AFX_FIELD_DIRECT) |
                       (1u << AFX_FIELD_FILTER_LEVEL0) | (1u << AFX_FIELD_FILTER_LEVEL1) |
                       (1u << AFX_FIELD_FILTER_LEVEL2) | (1u << AFX_FIELD_FILTER_LEVEL3) |
                       (1u << AFX_FIELD_FILTER_LEVEL4) | (1u << AFX_FIELD_FILTER_AD) |
                       (1u << AFX_FIELD_FILTER_DR);
-    zone.setup[AFX_FIELD_ENV_AD] = (uint16_t)(aica_rate(control_get(controls, CTRL_VOL_ATTACK, -12000), ar_time_ms) |
-        aica_rate(control_get(controls, CTRL_VOL_DECAY, -12000), dr_time_ms) << 6);
-    zone.setup[AFX_FIELD_ENV_DR] = (uint16_t)(aica_rate(control_get(controls, CTRL_VOL_RELEASE, -12000), dr_time_ms) | dl << 5 | 15 << 10);
-    zone.setup[AFX_FIELD_DIRECT] = (uint16_t)(q << 8 | dipan | (pan <= 0 ? 0x10 : 0));
-    zone.setup[AFX_FIELD_FILTER_LEVEL0] = filter_level(cutoff);
-    zone.setup[AFX_FIELD_FILTER_LEVEL1] = filter_level(peak);
-    zone.setup[AFX_FIELD_FILTER_LEVEL2] = zone.setup[AFX_FIELD_FILTER_LEVEL3] = filter_level(filter_sustain);
-    zone.setup[AFX_FIELD_FILTER_LEVEL4] = filter_level(cutoff);
-    zone.setup[AFX_FIELD_FILTER_AD] = (uint16_t)(filter_rate(control_get(controls, CTRL_MOD_ATTACK, -12000), peak - cutoff) << 8 |
-        filter_rate(control_get(controls, CTRL_MOD_DECAY, -12000), peak - filter_sustain));
-    zone.setup[AFX_FIELD_FILTER_DR] = (uint16_t)filter_rate(control_get(controls, CTRL_MOD_RELEASE, -12000), peak - cutoff);
+    if (options->envelope_model == AFX_C_SF2_ENVELOPE_SF2) {
+        zone.setup_mask |= (1u << AFX_FIELD_ENV_AD) | (1u << AFX_FIELD_ENV_DR);
+        zone.setup[AFX_FIELD_ENV_AD] = (uint16_t)(aica_rate(control_get(controls, CTRL_VOL_ATTACK, -12000), ar_time_ms) |
+            aica_rate(control_get(controls, CTRL_VOL_DECAY, -12000), dr_time_ms) << 6);
+        zone.setup[AFX_FIELD_ENV_DR] = (uint16_t)(aica_rate(control_get(controls, CTRL_VOL_RELEASE, -12000), dr_time_ms) | dl << 5 | 15 << 10);
+    }
+    /* DIRECT's high nibble is DISDL, not filter resonance.  SF2's initial
+       filter Q has no equivalent at this register; leave the direct path at
+       full level and retain SF2 pan in DIPAN. */
+    uint16_t direct = options->has_direct ? options->direct : 0x0f10;
+    /* `direct=` selects the direct-path/Q baseline; it does not freeze the
+     * low pan bits when source_pan is applied.  This is the same split used
+     * by the former Python author: keep Q, then lower SF2 + MIDI CC10 pan. */
+    if (options->source_pan)
+        direct = (uint16_t)((direct & 0xff00u) | dipan | (pan <= 0 ? 0x10 : 0));
+    zone.setup[AFX_FIELD_DIRECT] = direct;
+    if (options->has_lfo) {
+        zone.setup_mask |= 1u << AFX_FIELD_LFO;
+        zone.setup[AFX_FIELD_LFO] = options->lfo;
+    }
+    if (options->filter_model == AFX_C_SF2_FILTER_NONE) {
+        for (uint32_t field = AFX_FIELD_FILTER_LEVEL0; field <= AFX_FIELD_FILTER_LEVEL4; ++field)
+            zone.setup[field] = 0x1fffu;
+        zone.setup[AFX_FIELD_FILTER_AD] = zone.setup[AFX_FIELD_FILTER_DR] = 0;
+    } else {
+        zone.setup[AFX_FIELD_FILTER_LEVEL0] = filter_level(cutoff);
+        zone.setup[AFX_FIELD_FILTER_LEVEL1] = options->filter_model == AFX_C_SF2_FILTER_STATIC ? zone.setup[AFX_FIELD_FILTER_LEVEL0] : filter_level(peak);
+        zone.setup[AFX_FIELD_FILTER_LEVEL2] = zone.setup[AFX_FIELD_FILTER_LEVEL3] =
+            options->filter_model == AFX_C_SF2_FILTER_STATIC ? zone.setup[AFX_FIELD_FILTER_LEVEL0] : filter_level(filter_sustain);
+        zone.setup[AFX_FIELD_FILTER_LEVEL4] = zone.setup[AFX_FIELD_FILTER_LEVEL0];
+        zone.setup[AFX_FIELD_FILTER_AD] = options->filter_model == AFX_C_SF2_FILTER_STATIC ? 0 :
+            (uint16_t)(filter_rate(control_get(controls, CTRL_MOD_ATTACK, -12000), (int)lround(peak - cutoff)) << 8 |
+            filter_rate(control_get(controls, CTRL_MOD_DECAY, -12000), (int)lround(peak - filter_sustain)));
+        zone.setup[AFX_FIELD_FILTER_DR] = options->filter_model == AFX_C_SF2_FILTER_STATIC ? 0 :
+            (uint16_t)filter_rate(control_get(controls, CTRL_MOD_RELEASE, -12000), (int)lround(peak - cutoff));
+    }
     return zone;
 }
 
@@ -417,19 +665,22 @@ static void copy_sample_name(char out[AFX_C_SAMPLE_NAME_BYTES], const sf2_t *fon
     if (!bytes) snprintf(out, AFX_C_SAMPLE_NAME_BYTES, "sample-%u", sample_id);
 }
 
-static int append_note(resolver_t *resolver, const controls_t *controls) {
+static int append_note(resolver_t *resolver, const controls_t *controls,
+                       const modulators_t *modulators) {
     uint16_t sample_type;
     afx_c_sample_t sample;
     if (controls->sample < 0 || (uint32_t)controls->sample >= resolver->decoded_count) return -1;
     sample_type = le16(resolver->font->shdr + (uint32_t)controls->sample * SHDR_BYTES + 44) & 0x7fffu;
-    if ((resolver->channel == 1 && sample_type == 2) ||
-        (resolver->channel == 2 && sample_type == 4)) return 0;
-    if (ensure_sample(resolver, controls, (uint32_t)controls->sample, &sample)) return -1;
+    if ((resolver->options->channel == AFX_C_SF2_LEFT && sample_type == 2) ||
+        (resolver->options->channel == AFX_C_SF2_RIGHT && sample_type == 4)) return 0;
     controls_t selected = *controls;
+    apply_modulators(&selected, resolver->source, modulators, resolver->options->source_modulators);
+    if (ensure_sample(resolver, &selected, (uint32_t)selected.sample, &sample)) return -1;
     /* A one-side source is a mono memory-saving rendition, not hard-left or
      * hard-right stereo.  AICA receives it at centre pan. */
-    if (resolver->channel && sample_type != 1) control_set(&selected, CTRL_PAN, 0);
-    afx_c_zone_t candidate = lower_zone(&sample, &selected, resolver->source);
+    if (resolver->options->channel && sample_type != 1) control_set(&selected, CTRL_PAN, 0);
+    if (!resolver->options->source_pan) control_set(&selected, CTRL_PAN, 0);
+    afx_c_zone_t candidate = lower_zone(&sample, &selected, resolver->source, resolver->options);
     uint32_t zone = 0;
     while (zone < resolver->out->zone_count && !same_zone(resolver->out->zones + zone, &candidate)) ++zone;
     if (zone == resolver->out->zone_count) {
@@ -452,27 +703,45 @@ static int append_note(resolver_t *resolver, const controls_t *controls) {
     resolver->out->notes = grown;
     resolver->out->notes[resolver->out->note_count] = *resolver->source;
     resolver->out->notes[resolver->out->note_count].setup_index = (uint16_t)(zone + 1u);
-    resolver->out->notes[resolver->out->note_count++].mix = sf2_mix(&selected, resolver->source->velocity);
+    resolver->out->notes[resolver->out->note_count++].mix = sf2_mix(&selected, resolver->source,
+                                                                      resolver->options);
     resolver->matched = 1;
     return 0;
 }
 
-static int resolve_instrument(resolver_t *resolver, uint32_t index, controls_t inherited) {
+static int resolve_instrument(resolver_t *resolver, uint32_t index, controls_t inherited,
+                              modulators_t preset_modulators) {
     const sf2_t *font = resolver->font;
     if (index + 1u >= font->inst_count) return -1;
     uint32_t first = le16(font->inst + index * INST_BYTES + 20),
              last = le16(font->inst + (index + 1u) * INST_BYTES + 20);
     if (first > last || last >= font->ibag_count) return -1;
     controls_t global = controls_default();
+    modulators_t global_modulators = {.velocity_attenuation_amount = 960};
     for (uint32_t bag = first; bag < last; ++bag) {
         uint32_t gens_first = le16(font->ibag + bag * BAG_BYTES),
                  gens_last = le16(font->ibag + (bag + 1u) * BAG_BYTES);
         controls_t local = read_controls(font->igen, font->igen_count, gens_first, gens_last);
         if (local.key_lo > local.key_hi || local.velocity_lo > local.velocity_hi) return -1;
-        if (local.sample < 0) { global = overlay(global, &local); continue; }
+        if (local.sample < 0) {
+            global = overlay(global, &local);
+            if (modulator_override(font->imod, font->imod_count, font->ibag, bag, font->ibag_count,
+                                   &global_modulators)) return -1;
+            continue;
+        }
         controls_t instrument = overlay(global, &local);
+        modulators_t instrument_modulators = global_modulators;
+        if (modulator_override(font->imod, font->imod_count, font->ibag, bag, font->ibag_count,
+                               &instrument_modulators)) return -1;
         controls_t combined = add_controls(inherited, &instrument);
-        if (combined.sample >= 0 && matches(&combined, resolver->source) && append_note(resolver, &combined)) return -1;
+        combined.velocity_attenuation_amount = preset_modulators.velocity_attenuation_amount +
+                                               instrument_modulators.velocity_attenuation_amount;
+        combined.velocity_filter_amount = preset_modulators.velocity_filter_amount +
+                                          instrument_modulators.velocity_filter_amount;
+        modulators_t all_modulators = preset_modulators;
+        if (modulator_append(&all_modulators, &instrument_modulators)) return -1;
+        if (combined.sample >= 0 && matches(&combined, resolver->source) &&
+            append_note(resolver, &combined, &all_modulators)) return -1;
     }
     return 0;
 }
@@ -484,14 +753,24 @@ static int resolve_preset(resolver_t *resolver, uint32_t index) {
              last = le16(font->phdr + (index + 1u) * PHDR_BYTES + 24);
     if (first > last || last >= font->pbag_count) return -1;
     controls_t global = controls_default();
+    modulators_t global_modulators = {0};
     for (uint32_t bag = first; bag < last; ++bag) {
         uint32_t gens_first = le16(font->pbag + bag * BAG_BYTES),
                  gens_last = le16(font->pbag + (bag + 1u) * BAG_BYTES);
         controls_t local = read_controls(font->pgen, font->pgen_count, gens_first, gens_last);
         if (local.key_lo > local.key_hi || local.velocity_lo > local.velocity_hi) return -1;
-        if (local.instrument < 0) { global = overlay(global, &local); continue; }
+        if (local.instrument < 0) {
+            global = overlay(global, &local);
+            if (modulator_override(font->pmod, font->pmod_count, font->pbag, bag, font->pbag_count,
+                                   &global_modulators)) return -1;
+            continue;
+        }
         controls_t combined = overlay(global, &local);
-        if (matches(&combined, resolver->source) && resolve_instrument(resolver, (uint32_t)combined.instrument, combined))
+        modulators_t preset_modulators = global_modulators;
+        if (modulator_override(font->pmod, font->pmod_count, font->pbag, bag, font->pbag_count,
+                               &preset_modulators)) return -1;
+        if (matches(&combined, resolver->source) &&
+            resolve_instrument(resolver, (uint32_t)combined.instrument, combined, preset_modulators))
             return -1;
     }
     return 0;
@@ -504,17 +783,30 @@ void afx_c_sf2_output_free(afx_c_sf2_output_t *out) {
     *out = (afx_c_sf2_output_t){0};
 }
 
+void afx_c_sf2_options_default(afx_c_sf2_options_t *out) {
+    if (!out) return;
+    *out = (afx_c_sf2_options_t){.sample_format = AFX_SAMPLE_AUTO,
+                                 .channel = AFX_C_SF2_STEREO,
+                                 .filter_model = AFX_C_SF2_FILTER_ENVELOPE,
+                                 .gain_model = AFX_C_SF2_GAIN_STANDARD,
+                                 .envelope_model = AFX_C_SF2_ENVELOPE_SF2,
+                                 .source_pan = 1, .source_modulators = 1};
+}
+
 int afx_c_sf2_resolve(const char *path, const afx_c_note_t *notes, uint32_t count,
-                      uint8_t sample_format, uint8_t channel, afx_c_sf2_output_t *out) {
+                      const afx_c_sf2_options_t *options, afx_c_sf2_output_t *out) {
     uint8_t *data = NULL;
     uint32_t bytes = 0;
     sf2_t font;
     decoded_t *decoded = NULL;
-    if (!path || !notes || !count || !out || sample_format > AFX_SAMPLE_AUTO ||
-        channel > AFX_C_SF2_RIGHT ||
+    if (!path || !notes || !count || !options || !out || options->sample_format > AFX_SAMPLE_AUTO ||
+        options->channel > AFX_C_SF2_RIGHT || options->filter_offset_cents < -16000 || options->filter_offset_cents > 16000 ||
+        options->filter_model > AFX_C_SF2_FILTER_NONE || options->gain_model > AFX_C_SF2_GAIN_FLUIDSYNTH2 ||
+        options->envelope_model > AFX_C_SF2_ENVELOPE_FIXED || options->gain_bias_centibels < -10200 || options->gain_bias_centibels > 10200 ||
         read_file(path, &data, &bytes) || load_font(data, bytes, &font)) goto failed;
     *out = (afx_c_sf2_output_t){0};
-    decoded = calloc(font.shdr_count - 1u, sizeof(*decoded));
+    if (font.shdr_count - 1u > UINT32_MAX / 2u) goto failed;
+    decoded = calloc((font.shdr_count - 1u) * 2u, sizeof(*decoded));
     if (!decoded) goto failed;
     for (uint32_t note = 0; note < count; ++note) {
         uint32_t target_bank = (uint32_t)notes[note].bank_msb * 128u + notes[note].bank_lsb;
@@ -523,15 +815,15 @@ int afx_c_sf2_resolve(const char *path, const afx_c_note_t *notes, uint32_t coun
             if (le16(font.phdr + index * PHDR_BYTES + 20) == notes[note].program &&
                 le16(font.phdr + index * PHDR_BYTES + 22) == target_bank) { preset = (int)index; break; }
         if (preset < 0) goto failed;
-        resolver_t resolver = {out, decoded, font.shdr_count - 1u, &font, notes + note, sample_format, channel, 0};
+        resolver_t resolver = {out, decoded, font.shdr_count - 1u, &font, notes + note, options, 0};
         if (resolve_preset(&resolver, (uint32_t)preset) || !resolver.matched) goto failed;
     }
-    out->owned_samples = calloc(font.shdr_count - 1u, sizeof(*out->owned_samples));
+    out->owned_samples = calloc((font.shdr_count - 1u) * 2u, sizeof(*out->owned_samples));
     if (!out->owned_samples) goto failed;
-    for (uint32_t i = 0; i + 1u < font.shdr_count; ++i)
+    for (uint32_t i = 0; i < (font.shdr_count - 1u) * 2u; ++i)
         if (decoded[i].ready) out->owned_samples[out->owned_count++] = decoded[i].data;
     free(decoded); free(data); return 0;
 failed:
-    if (decoded) for (uint32_t i = 0; i + 1u < font.shdr_count; ++i) free(decoded[i].data);
+    if (decoded) for (uint32_t i = 0; i < (font.shdr_count - 1u) * 2u; ++i) free(decoded[i].data);
     free(decoded); free(data); afx_c_sf2_output_free(out); return -1;
 }

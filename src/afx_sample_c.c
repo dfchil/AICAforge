@@ -1,6 +1,7 @@
 #include "afx_sample_c.h"
 
 #include <math.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -8,6 +9,93 @@ int ya2beam_encode(const int16_t *pcm, int n, int width, uint8_t *out);
 
 static int16_t read_pcm16(const uint8_t *p) {
     return (int16_t)((uint16_t)p[0] | (uint16_t)p[1] << 8);
+}
+
+static unsigned rate_gcd(unsigned a, unsigned b) {
+    while (b) { unsigned next = a % b; a = b; b = next; }
+    return a;
+}
+
+/* Modified Bessel I0.  The short positive series is stable for the fixed
+ * Kaiser beta=5 used by scipy.signal.resample_poly. */
+static double i0(double value) {
+    double term = 1.0, sum = 1.0;
+    double square = value * value / 4.0;
+    for (unsigned k = 1; k < 64; ++k) {
+        term *= square / ((double)k * k);
+        sum += term;
+        if (term <= sum * 1e-16) break;
+    }
+    return sum;
+}
+
+static int16_t round_pcm16(double value) {
+    value = nearbyint(value);
+    if (value < -32768.0) return -32768;
+    if (value > 32767.0) return 32767;
+    return (int16_t)value;
+}
+
+int afx_c_resample_pcm16(const uint8_t *pcm16, uint32_t frames,
+                         uint32_t source_rate, uint32_t target_rate,
+                         uint8_t **out_pcm16, uint32_t *out_frames) {
+    unsigned gcd, up, down, max_rate, half, taps, pre_pad, remove;
+    uint32_t result_frames;
+    double *filter = NULL;
+    uint8_t *result = NULL;
+    if (!pcm16 || !frames || !source_rate || !target_rate || !out_pcm16 || !out_frames) return -1;
+    if (source_rate == target_rate) {
+        result = malloc((size_t)frames * 2u);
+        if (!result) return -1;
+        memcpy(result, pcm16, (size_t)frames * 2u);
+        *out_pcm16 = result; *out_frames = frames; return 0;
+    }
+    gcd = rate_gcd(source_rate, target_rate);
+    up = target_rate / gcd; down = source_rate / gcd;
+    if ((uint64_t)frames * up > UINT32_MAX * (uint64_t)down) return -1;
+    result_frames = (uint32_t)(((uint64_t)frames * up + down - 1u) / down);
+    max_rate = up > down ? up : down;
+    if (max_rate > (UINT_MAX - 1u) / 20u) return -1;
+    half = 10u * max_rate;
+    taps = 2u * half + 1u;
+    pre_pad = down - half % down;
+    remove = (half + pre_pad) / down;
+    if (taps > UINT32_MAX - pre_pad || result_frames > UINT32_MAX - remove ||
+        (uint64_t)(taps + pre_pad) > SIZE_MAX / sizeof(*filter) ||
+        (uint64_t)result_frames > SIZE_MAX / 2u) return -1;
+    filter = calloc((size_t)taps + pre_pad, sizeof(*filter));
+    result = malloc((size_t)result_frames * 2u);
+    if (!filter || !result) goto failed;
+    double sum = 0.0, denominator = i0(5.0);
+    for (unsigned index = 0; index < taps; ++index) {
+        double distance = (double)index - half;
+        double x = distance / max_rate;
+        double sinc = distance == 0.0 ? 1.0 : sin(acos(-1.0) * x) / (acos(-1.0) * x);
+        double ratio = distance / half;
+        double window = i0(5.0 * sqrt(fmax(0.0, 1.0 - ratio * ratio))) / denominator;
+        filter[pre_pad + index] = sinc / max_rate * window;
+        sum += filter[pre_pad + index];
+    }
+    for (unsigned index = pre_pad; index < pre_pad + taps; ++index) filter[index] *= up / sum;
+    for (uint32_t output = 0; output < result_frames; ++output) {
+        uint64_t sample_at = (uint64_t)(output + remove) * down;
+        uint64_t first = sample_at >= taps + pre_pad - 1u ?
+                         (sample_at - (taps + pre_pad - 1u) + up - 1u) / up : 0;
+        uint64_t last = sample_at / up;
+        double value = 0.0;
+        if (last >= frames) last = frames - 1u;
+        for (uint64_t input = first; input <= last; ++input) {
+            uint64_t coefficient = sample_at - input * up;
+            if (coefficient < taps + pre_pad)
+                value += read_pcm16(pcm16 + 2u * input) * filter[coefficient];
+        }
+        int16_t rounded = round_pcm16(value);
+        result[2u * output] = (uint8_t)rounded;
+        result[2u * output + 1u] = (uint8_t)(rounded >> 8);
+    }
+    free(filter); *out_pcm16 = result; *out_frames = result_frames; return 0;
+failed:
+    free(filter); free(result); return -1;
 }
 
 static void adpcm_decode(const uint8_t *data, uint32_t frames, int16_t *out) {
@@ -52,12 +140,41 @@ const char *afx_c_sample_format_name(uint8_t format) {
     return format <= AFX_SAMPLE_AUTO ? names[format] : "invalid";
 }
 
+int afx_c_encode_sample_auto(const uint8_t *pcm16, uint32_t frames,
+                             double minimum_snr, double minimum_attack_snr,
+                             uint8_t fallback_format,
+                             uint8_t **out_data, uint32_t *out_bytes,
+                             uint8_t *out_format) {
+    uint8_t *data = NULL;
+    int16_t *source = NULL, *decoded = NULL;
+    if (!pcm16 || !frames || frames > 65535 || fallback_format > AFX_ADPCM ||
+        !out_data || !out_bytes || !out_format) return -1;
+    source = malloc((size_t)frames * sizeof(*source));
+    data = malloc((frames + 1u) / 2u);
+    decoded = malloc((size_t)frames * sizeof(*decoded));
+    if (!source || !data || !decoded) goto failed;
+    for (uint32_t i = 0; i < frames; ++i) source[i] = read_pcm16(pcm16 + 2u * i);
+    if (ya2beam_encode(source, (int)frames, 32, data)) goto failed;
+    adpcm_decode(data, frames, decoded);
+    if (meets_quality(pcm16, decoded, frames, minimum_snr, minimum_attack_snr)) {
+        free(source); free(decoded);
+        *out_data = data; *out_bytes = (frames + 1u) / 2u; *out_format = AFX_ADPCM; return 0;
+    }
+    free(source); free(decoded); free(data);
+    return afx_c_encode_sample(pcm16, frames, 0, fallback_format, out_data, out_bytes, out_format);
+failed:
+    free(source); free(data); free(decoded); return -1;
+}
+
 int afx_c_encode_sample(const uint8_t *pcm16, uint32_t frames, int looping, uint8_t requested_format,
                         uint8_t **out_data, uint32_t *out_bytes, uint8_t *out_format) {
     uint8_t *data = NULL;
-    int16_t *source = NULL, *decoded = NULL;
+    int16_t *source = NULL;
     if (!pcm16 || !frames || frames > 65535 || requested_format > AFX_SAMPLE_AUTO ||
         !out_data || !out_bytes || !out_format) return -1;
+    (void)looping;
+    if (requested_format == AFX_SAMPLE_AUTO)
+        return afx_c_encode_sample_auto(pcm16, frames, 30.0, 24.0, AFX_PCM8, out_data, out_bytes, out_format);
     if (requested_format == AFX_PCM16) {
         data = malloc((size_t)frames * 2u);
         if (!data) return -1;
@@ -72,20 +189,9 @@ int afx_c_encode_sample(const uint8_t *pcm16, uint32_t frames, int looping, uint
     }
     source = malloc((size_t)frames * sizeof(*source));
     data = malloc((frames + 1u) / 2u);
-    decoded = malloc((size_t)frames * sizeof(*decoded));
-    if (!source || !data || !decoded) goto failed;
+    if (!source || !data) { free(source); free(data); return -1; }
     for (uint32_t i = 0; i < frames; ++i) source[i] = read_pcm16(pcm16 + 2u * i);
-    if (ya2beam_encode(source, (int)frames, 32, data)) goto failed;
-    adpcm_decode(data, frames, decoded);
-    if (requested_format == AFX_ADPCM || (!looping && meets_quality(pcm16, decoded, frames, 30.0, 24.0))) {
-        free(source); free(decoded);
-        *out_data = data; *out_bytes = (frames + 1u) / 2u; *out_format = AFX_ADPCM; return 0;
-    }
-    free(source); free(decoded); free(data);
-    /* PCM8 is the established AICAflow baseline; its 8-bit conversion is
-     * audibly robust for the existing DKR and music banks. PCM16 stays an
-     * explicit map choice, rather than allowing `auto` to exceed AICA RAM. */
-    return afx_c_encode_sample(pcm16, frames, looping, AFX_PCM8, out_data, out_bytes, out_format);
-failed:
-    free(source); free(data); free(decoded); return -1;
+    if (ya2beam_encode(source, (int)frames, 32, data)) { free(source); free(data); return -1; }
+    free(source);
+    *out_data = data; *out_bytes = (frames + 1u) / 2u; *out_format = AFX_ADPCM; return 0;
 }

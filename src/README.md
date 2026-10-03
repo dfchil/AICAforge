@@ -18,6 +18,13 @@ build/afx_profile apply song.afx song.afc song.afp song-performance.afx song-per
 build/afx_profile inventory song.afx
 ```
 
+`export-lanes reference.afx base.afx profile.afp preset send [tempo_q8_8]`
+turns an ABI-7 reference flow's sustained `PATCH` commands into an editable
+profile bound to `base.afx`. It follows the source NOTE order, rather than
+copying allocator channel numbers, so it is useful when a rebuilt bank changes
+voice allocation. It is a host migration aid; the generated profile and normal
+`apply` path remain the only runtime-facing representation.
+
 `inventory` is a read-only selector list for an editor or a human author. It
 keeps the profile itself compact: a template is not repeated for every note it
 affects. See [the AFP specification](../../docs/specs/assets.md#afp--performance-profile)
@@ -25,8 +32,34 @@ for the inheritance order and supported register fields.
 
 The compiler emits `song.afb`, `song.afx`, `song.afc`, and `song.afv` together.
 The AFB is one 32-byte-aligned payload; the AFX only contains setup registers
-and control commands. AFC and AFV are optional at runtime, but deterministic
-outputs of this authoring step.
+and control commands. The shared C emitter greedily reuses a sample's most
+common setup and puts only divergent envelope, filter, LFO, DSP-send or pan
+words on the affected NOTE. This applies equally to raw zones, MIDI/SF2 and
+bank-map builds. Importers first lower into the same unoptimized zone +
+NOTE/PATCH/KEYOFF representation, then use that optimizer and emitter; it
+never changes audible register state. AFC and AFV are optional at runtime,
+but deterministic outputs of this authoring step.
+
+`afx_n64` is the equivalent direct path for Nintendo 64 `B1` ALBank control
+data, its sample table, and an `S1` compact-sequence file. It does **not**
+round-trip through MIDI: CSeq becomes the same neutral note timeline, ALBank
+becomes the same raw zones, and the common optimizer/emitter writes the final
+assets. This makes the N64 path a reference for future source importers
+without adding an N64-specific AFX variant.
+
+```sh
+build/afx_n64 audio_control.bin audio_table.bin sequences.bin 7 title_theme.afx
+```
+
+The command writes `title_theme.afb`, `.afx`, `.afc`, and `.afv`. It retains
+the AL envelope, key/velocity region, root key, detune, pan, CC91 send and
+VADPCM/RAW16 sample meaning offline. Infinite CSeq loops end at their first
+boundary because the emitted AFX remains finite.
+
+`afx_vgm` follows that identical final pipeline for Sega MultiPCM VGM/VGZ
+captures. Its source register writes become raw NOTE/PATCH/KEYOFF events; the
+same optimizer handles its setup dictionary and the same emitter writes the
+four assets.
 
 Zone maps are deliberately small text files:
 
@@ -46,6 +79,10 @@ map. `auto` deliberately skips ADPCM for looped sources, because its predictor
 seam needs a real hardware capture check. The gate is deterministic, and
 affects only the generated AFB, never runtime behavior.
 
+The compiler does not use the raw 65,535-frame AICA limit directly. One-shots
+reserve a 256-frame silent safety tail and stop at 65,279 frames; looped
+sources stop at 65,500 so inclusive loop-end rounding remains safe.
+
 For declared SoundFont input, the C reader follows MIDI program/bank selection,
 SF2 preset/instrument zones, key/velocity ranges, root-key overrides, tuning
 and loop mode, then expands intentional SF2 layers before emitting ordinary
@@ -58,19 +95,25 @@ build/afx_compile song.mid --sf2 auto GeneralUser.sf2 song.afb song.afx
 To make one bank shared by several pieces, create an `.afbm` bank map. It is
 the editable source of truth: `source` declares any number of SoundFonts (with
 an optional `stereo`, `left`, or `right` channel selection), and
-each `map` routes a MIDI bank/program pair to an SF2 bank/program and explicitly
-chooses that mapping's sample format. A song may therefore use several source
-banks without creating a second runtime bank type.
+each `map` routes a MIDI bank/program pair to an SF2 bank/program, explicitly
+chooses that mapping's sample format, and accepts named conversion settings
+such as decoded rate, filter policy, gain calibration, envelope policy and
+loop trimming. A `song` may set its
+offline control tick rate and an optional release-tail duration in milliseconds.
+The tail reserves a channel after its musical KEYOFF, so an SF2 release can
+finish naturally without a runtime extension. AICA receives the resulting
+fixed-rate stream. A song may therefore use several source banks without
+creating a second runtime bank type.
 
 ```text
 source gm        soundfonts/GeneralUser.sf2
 source orchestra soundfonts/orchestra.sf2 stereo
 
-# map <song|*> <midi-bank> <midi-program> <source> <sf2-bank> <sf2-program> <format>
-map * 0 0  gm        0 0  auto
-map * 0 42 orchestra 0 42 pcm16
+# map <song|*> <midi-bank> <midi-program> <source> <sf2-bank> <sf2-program> <format> [key=value ...]
+map * 0 0  gm        0 0  auto rate=22050
+map * 0 42 orchestra 0 42 pcm16 rate=44100 filter=static gain=fluidsynth2
 
-song title_theme midi/title_theme.mid
+song title_theme midi/title_theme.mid 1000 750
 song field_theme midi/field_theme.mid
 ```
 
@@ -82,7 +125,18 @@ This writes `output/music.afb` and `output/<basename>.afx/.afc/.afv` for each
 line. Every output AFX is validated against the one AFB identity; it never
 contains a fallback sample copy. A song-specific `map title_theme ...` takes
 precedence over a `map * ...` default, so separate MIDI files may reuse the
-same MIDI program with different source presets.
+same MIDI program with different source presets. `midi_channel=<0..15>`
+optionally narrows a map to one source MIDI channel and wins over the generic
+map for that song/program.
+
+`afx_bank --merge` is for source importers that already emitted complete
+single-song AFB+AFX+AFC sets. It deduplicates their sample payloads into one
+AFB and rewrites each flow and seek sidecar to bind to that bank. It is how
+DKR's direct CSeq path makes its shared music bank; it adds no runtime format.
+
+```sh
+build/afx_bank --merge music.afb controls raw/sequence_*.afx
+```
 
 Generate an editable starting map from one SoundFont and one or more MIDI
 inputs; the generated mappings use `auto` and can be revised afterwards:

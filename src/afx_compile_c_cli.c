@@ -98,6 +98,14 @@ failed:
 }
 
 int main(int argc, char **argv) {
+    if (argc == 4 && !strcmp(argv[1], "--visual")) {
+        uint32_t bytes = 0, visual_bytes = 0;
+        uint8_t *afx = read_file(argv[2], &bytes), *visual = NULL;
+        int result = !afx || afx_c_visualize(afx, bytes, &visual, &visual_bytes) ||
+                     write_file(argv[3], visual, visual_bytes);
+        free(afx); free(visual);
+        return result ? fprintf(stderr, "cannot generate AFX visualizer\n"), 1 : 0;
+    }
     if (argc == 4 && !strcmp(argv[1], "--summary")) {
         uint32_t afb_bytes = 0, afx_bytes = 0, notes = 0;
         afx_file_header_t header;
@@ -123,9 +131,10 @@ int main(int argc, char **argv) {
     int zones_mode = argc == 6 && !strcmp(argv[2], "--zones");
     int sf2_mode = argc == 7 && !strcmp(argv[2], "--sf2");
     if ((argc != 4 && argc != 5) && !zones_mode && !sf2_mode)
-        return fprintf(stderr, "usage: %s source.mid [sample.pcm] out.afb out.afx\n"
+        return fprintf(stderr, "usage: %s --visual flow.afx out.afv\n"
+                       "       %s source.mid [sample.pcm] out.afb out.afx\n"
                        "       %s source.mid --zones zones.txt out.afb out.afx\n"
-                       "       %s source.mid --sf2 pcm16|pcm8|adpcm|auto bank.sf2 out.afb out.afx\n", argv[0], argv[0], argv[0]), 2;
+                       "       %s source.mid --sf2 pcm16|pcm8|adpcm|auto bank.sf2 out.afb out.afx\n", argv[0], argv[0], argv[0], argv[0]), 2;
     uint32_t midi_bytes;
     uint8_t *data = read_file(argv[1], &midi_bytes);
     if (!data) return fprintf(stderr, "cannot read %s\n", argv[1]), 2;
@@ -140,9 +149,10 @@ int main(int argc, char **argv) {
     afx_c_zone_t *zones = NULL; uint8_t **owned = NULL; uint32_t zone_count = 0;
     afx_c_sf2_output_t sf2 = {0};
     if (!parsed && zones_mode && load_zones(argv[3], &zones, &owned, &zone_count)) parsed = -1;
-    uint8_t sf2_format = 0;
-    if (!parsed && sf2_mode && (afx_c_parse_sample_format(argv[3], &sf2_format) ||
-                                afx_c_sf2_resolve(argv[4], notes, count, sf2_format, AFX_C_SF2_STEREO, &sf2))) parsed = -1;
+    afx_c_sf2_options_t sf2_options;
+    afx_c_sf2_options_default(&sf2_options);
+    if (!parsed && sf2_mode && (afx_c_parse_sample_format(argv[3], &sf2_options.sample_format) ||
+                                afx_c_sf2_resolve(argv[4], notes, count, &sf2_options, &sf2))) parsed = -1;
     int result = parsed || (argc == 5 && (!pcm || (pcm_bytes & 1))) ? -1 :
                  sf2_mode ? afx_c_compile_zones(sf2.notes, sf2.note_count, 1000,
                                                  sf2.zones, sf2.zone_count, &out) :

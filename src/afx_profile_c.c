@@ -9,7 +9,7 @@
 
 /* AFP is an offline transform. The parser accepts only the small documented
  * JSON schema; the Dreamcast never sees this data. */
-enum { PROFILE_VERSION = 3, PROFILE_NAME_BYTES = 48, PROFILE_TEMPLATES = 64 };
+enum { PROFILE_VERSION = 4, PROFILE_NAME_BYTES = 48, PROFILE_TEMPLATES = 64 };
 typedef struct { uint32_t mask; uint16_t values[AFX_FIELD_COUNT]; } params_t;
 typedef struct { char name[PROFILE_NAME_BYTES]; params_t parameters; } template_t;
 typedef struct {
@@ -17,10 +17,22 @@ typedef struct {
     char template_name[PROFILE_NAME_BYTES]; params_t parameters;
 } override_t;
 typedef struct {
+    uint32_t tick, ordinal, offset, pending_tick; uint8_t channel; bool pending, used;
+    params_t parameters;
+} lane_t;
+typedef struct {
+    uint32_t tick, ordinal, end_tick;
+    uint8_t channel, claimed;
+    /* Stable sounding-note signature used only by `export-lanes`.  It makes
+     * profile migration independent of virtual-channel allocation. */
+    uint16_t state[AFX_FIELD_COUNT];
+} note_identity_t;
+typedef struct {
     char sha256[65], preset[32]; uint16_t tempo_q8_8; params_t defaults;
     template_t templates[PROFILE_TEMPLATES]; uint32_t template_count;
     char (*setup_templates)[PROFILE_NAME_BYTES]; uint32_t setup_count;
     override_t *overrides; uint32_t override_count, override_capacity;
+    lane_t *lanes; uint32_t lane_count, lane_capacity;
 } profile_t;
 typedef enum { JSON_UNDEFINED, JSON_OBJECT, JSON_ARRAY, JSON_STRING, JSON_PRIMITIVE } json_type_t;
 typedef struct { json_type_t type; int start, end, parent; } json_token_t;
@@ -201,6 +213,10 @@ static int field_id(const char *name) {
     for (uint32_t i = 0; i < sizeof(ids) / sizeof(ids[0]); ++i) if (!strcmp(name, names[i])) return ids[i];
     return -1;
 }
+static const char *field_name(uint32_t field) {
+    static const char *const names[] = {NULL,NULL,NULL,NULL,"env_ad","env_dr",NULL,"lfo","dsp_send","direct","mix","filter_level0","filter_level1","filter_level2","filter_level3","filter_level4","filter_ad","filter_dr"};
+    return field < sizeof(names) / sizeof(names[0]) ? names[field] : NULL;
+}
 static void params_merge(params_t *into, const params_t *from) {
     for (uint32_t field = 0; field < AFX_FIELD_COUNT; ++field) if (from->mask & (1u << field)) into->values[field] = from->values[field];
     into->mask |= from->mask;
@@ -272,7 +288,43 @@ static int parse_overrides(const char *json, const json_token_t *tokens, int cou
     }
     return 0;
 }
-static void profile_free(profile_t *profile) { free(profile->setup_templates); free(profile->overrides); *profile = (profile_t){0}; }
+static int lane_push(profile_t *profile, lane_t **out) {
+    if (profile->lane_count == profile->lane_capacity) {
+        uint32_t capacity = profile->lane_capacity ? profile->lane_capacity * 2u : 32u;
+        lane_t *grown = realloc(profile->lanes, (size_t)capacity * sizeof(*grown));
+        if (!grown) return -1;
+        profile->lanes = grown; profile->lane_capacity = capacity;
+    }
+    *out = &profile->lanes[profile->lane_count++]; **out = (lane_t){0}; return 0;
+}
+/* A lane is a sustained, offline change belonging to one NOTE identity.  The
+ * offset is deliberately relative to NOTE-on, so a profile remains readable
+ * and does not need a separate runtime notion of musical time. */
+static int parse_lanes(const char *json, const json_token_t *tokens, int count, int array, profile_t *profile) {
+    if (array < 0 || tokens[array].type != JSON_ARRAY) return -1;
+    for (int item = array + 1; item < count && tokens[item].start < tokens[array].end; item = token_next(tokens, count, item)) {
+        lane_t *lane; int event, value; char kind[16]; unsigned channel, offset;
+        if (tokens[item].parent != array || lane_push(profile, &lane) ||
+            (event = object_value(json, tokens, count, item, "event")) < 0 ||
+            (value = object_value(json, tokens, count, event, "kind")) < 0 ||
+            token_string(json, tokens, value, kind, sizeof(kind)) || strcmp(kind, "note") ||
+            (value = object_value(json, tokens, count, event, "tick")) < 0 ||
+            token_unsigned(json, tokens, value, &lane->tick) ||
+            (value = object_value(json, tokens, count, event, "ordinal")) < 0 ||
+            token_unsigned(json, tokens, value, &lane->ordinal) ||
+            (value = object_value(json, tokens, count, event, "channel")) < 0 ||
+            token_unsigned(json, tokens, value, &channel) || channel >= AFX_MAX_FLOW_CHANNELS ||
+            (value = object_value(json, tokens, count, item, "offset")) < 0 ||
+            token_unsigned(json, tokens, value, &offset) ||
+            (value = object_value(json, tokens, count, item, "parameters")) < 0 ||
+            parse_params(json, tokens, count, value, &lane->parameters) || !lane->parameters.mask) return -1;
+        lane->channel = (uint8_t)channel; lane->offset = offset;
+    }
+    return 0;
+}
+static void profile_free(profile_t *profile) {
+    free(profile->setup_templates); free(profile->overrides); free(profile->lanes); *profile = (profile_t){0};
+}
 static int profile_read(const char *path, const uint8_t *base, uint32_t base_bytes, uint32_t setup_count, profile_t *out) {
     uint8_t *json = NULL; uint32_t bytes; json_token_t *tokens = NULL; int count, root, value; char format[32], sha[65]; unsigned version, afx_version;
     *out = (profile_t){.tempo_q8_8 = 256}; out->setup_count = setup_count; out->setup_templates = calloc(setup_count ? setup_count : 1u, PROFILE_NAME_BYTES);
@@ -290,7 +342,8 @@ static int profile_read(const char *path, const uint8_t *base, uint32_t base_byt
         (value = object_value((char *)json, tokens, count, root, "defaults")) < 0 || parse_params((char *)json, tokens, count, value, &out->defaults) ||
         (value = object_value((char *)json, tokens, count, root, "templates")) < 0 || parse_templates((char *)json, tokens, count, value, out) ||
         (value = object_value((char *)json, tokens, count, root, "setup_templates")) < 0 || parse_setup_templates((char *)json, tokens, count, value, out) ||
-        (value = object_value((char *)json, tokens, count, root, "overrides")) < 0 || parse_overrides((char *)json, tokens, count, value, out)) goto failed;
+        (value = object_value((char *)json, tokens, count, root, "overrides")) < 0 || parse_overrides((char *)json, tokens, count, value, out) ||
+        (value = object_value((char *)json, tokens, count, root, "lanes")) < 0 || parse_lanes((char *)json, tokens, count, value, out)) goto failed;
     if ((value = object_value((char *)json, tokens, count, root, "tempo_q8_8")) >= 0) {
         unsigned tempo;
         if (token_unsigned((char *)json, tokens, value, &tempo) || tempo < 16 || tempo > 4096) goto failed;
@@ -317,7 +370,7 @@ static int profile_write(const char *path, const uint8_t *base, uint32_t bytes, 
         "{\n  \"format\": \"aicaflow.afp\",\n  \"version\": %u,\n"
         "  \"base\": { \"afx_version\": %u, \"canonical_sha256\": \"%s\" },\n"
         "  \"dsp\": { \"preset\": \"%s\" },\n  \"tempo_q8_8\": 256,\n  \"defaults\": %s,\n"
-        "  \"templates\": {},\n  \"setup_templates\": {},\n  \"overrides\": []\n}\n",
+        "  \"templates\": {},\n  \"setup_templates\": {},\n  \"overrides\": [],\n  \"lanes\": []\n}\n",
         PROFILE_VERSION, AFX_FILE_VERSION, sha, preset, defaults) < 0;
     failed |= fclose(file); return failed ? -1 : 0;
 }
@@ -329,13 +382,18 @@ static int bytes_reserve(bytes_t *out, uint32_t bytes) {
     out->data = grown; out->capacity = capacity; return 0;
 }
 static int bytes_event(bytes_t *out, const afx_event_t *event, const uint16_t values[AFX_FIELD_COUNT]) {
-    uint8_t encoded[8 + AFX_SETUP_BYTES]; uint32_t bytes;
-    if (afx_encode_event(encoded, sizeof(encoded), event, values, &bytes) || bytes > UINT32_MAX - out->used || bytes_reserve(out, out->used + bytes)) return -1;
+    uint8_t encoded[8 + AFX_SETUP_BYTES]; uint32_t bytes; afx_event_t compact = *event;
+    if (compact.opcode == AFX_OP_NOTE && compact.mask == AFX_NOTE_PL_MASK) compact.opcode = AFX_OP_NOTE_PL;
+    else if (compact.opcode == AFX_OP_PATCH && compact.mask == (1u << AFX_FIELD_TOTAL_LEVEL)) compact.opcode = AFX_OP_PATCH_LEVEL;
+    if (afx_encode_event(encoded, sizeof(encoded), &compact, values, &bytes) || bytes > UINT32_MAX - out->used || bytes_reserve(out, out->used + bytes)) return -1;
     memcpy(out->data + out->used, encoded, bytes); out->used += bytes; return 0;
 }
 static void event_values(const afx_event_t *event, uint16_t values[AFX_FIELD_COUNT]) {
-    const uint8_t *at = event->values; memset(values, 0, AFX_SETUP_BYTES);
-    for (uint32_t field = 0; field < AFX_FIELD_COUNT; ++field) if (event->mask & (1u << field)) { values[field] = afx_read16(at); at += 2; }
+    const uint8_t *at = event->values;
+    uint32_t value = 0;
+    memset(values, 0, AFX_SETUP_BYTES);
+    for (uint32_t field = 0; field < AFX_FIELD_COUNT; ++field)
+        if (event->mask & (1u << field)) { values[value++] = afx_read16(at); at += 2; }
 }
 static void resolved_params(profile_t *profile, uint32_t setup, uint32_t tick, uint32_t ordinal, uint8_t channel, params_t *out) {
     *out = profile->defaults;
@@ -349,8 +407,23 @@ static void resolved_params(profile_t *profile, uint32_t setup, uint32_t tick, u
     }
 }
 static void event_params(afx_event_t *event, uint16_t values[AFX_FIELD_COUNT], const params_t *parameters) {
-    for (uint32_t field = 0; field < AFX_FIELD_COUNT; ++field) if (parameters->mask & (1u << field)) values[field] = parameters->values[field];
+    uint16_t state[AFX_FIELD_COUNT] = {0};
+    uint32_t value = 0;
+    for (uint32_t field = 0; field < AFX_FIELD_COUNT; ++field)
+        if (event->mask & (1u << field)) state[field] = values[value++];
+    for (uint32_t field = 0; field < AFX_FIELD_COUNT; ++field)
+        if (parameters->mask & (1u << field)) state[field] = parameters->values[field];
     event->mask |= parameters->mask;
+    value = 0;
+    for (uint32_t field = 0; field < AFX_FIELD_COUNT; ++field)
+        if (event->mask & (1u << field)) values[value++] = state[field];
+}
+static int write_wait(bytes_t *stream, uint32_t ticks) {
+    afx_event_t wait = {
+        .opcode = ticks <= UINT8_MAX ? AFX_OP_WAIT8 : ticks <= UINT16_MAX ? AFX_OP_WAIT16 : AFX_OP_WAIT32,
+        .wait = ticks
+    };
+    return bytes_event(stream, &wait, NULL);
 }
 static int rewrite_stream(const uint8_t *image, const afx_file_header_t *header, profile_t *profile, bytes_t *stream, uint32_t *max_commands, uint32_t *max_writes) {
     uint32_t at = header->stream_offset, end = at + header->stream_size, tick = 0, ordinal = 0, ordinal_tick = UINT32_MAX, commands = 0, writes = 0;
@@ -359,18 +432,54 @@ static int rewrite_stream(const uint8_t *image, const afx_file_header_t *header,
         afx_event_t event; uint16_t values[AFX_FIELD_COUNT];
         if (afx_decode_event(image + at, end - at, &event)) return -1;
         at += event.bytes; event_values(&event, values);
-        if (event.opcode >= AFX_OP_WAIT8 && event.opcode <= AFX_OP_WAIT32) { if (commands > *max_commands) *max_commands = commands; if (writes > *max_writes) *max_writes = writes; commands = writes = 0; tick += event.wait; }
+        if (event.opcode >= AFX_OP_WAIT8 && event.opcode <= AFX_OP_WAIT32) {
+            uint32_t next = tick + event.wait;
+            if (next < tick) return -1;
+            for (;;) {
+                lane_t *lane = NULL;
+                for (uint32_t i = 0; i < profile->lane_count; ++i)
+                    if (profile->lanes[i].pending && profile->lanes[i].pending_tick <= next &&
+                        (!lane || profile->lanes[i].pending_tick < lane->pending_tick)) lane = &profile->lanes[i];
+                if (!lane) break;
+                if (lane->pending_tick > tick && write_wait(stream, lane->pending_tick - tick)) return -1;
+                if (commands > *max_commands) *max_commands = commands;
+                if (writes > *max_writes) *max_writes = writes;
+                commands = writes = 0; tick = lane->pending_tick;
+                if (!active_note[lane->channel]) return -1;
+                event = (afx_event_t){.opcode = AFX_OP_PATCH, .channel = lane->channel, .mask = lane->parameters.mask};
+                memset(values, 0, sizeof(values));
+                params_merge(&active[lane->channel], &lane->parameters);
+                event_params(&event, values, &active[lane->channel]);
+                ++commands; writes += afx_field_value_bytes(event.mask) / 2u;
+                if (commands > AFX_EXECUTION_BUDGET_COMMANDS || writes > AFX_EXECUTION_BUDGET_WRITES || bytes_event(stream, &event, values)) return -1;
+                lane->pending = false; lane->used = true;
+            }
+            if (next > tick && write_wait(stream, next - tick)) return -1;
+            if (commands > *max_commands) *max_commands = commands;
+            if (writes > *max_writes) *max_writes = writes;
+            commands = writes = 0; tick = next;
+            continue;
+        }
         else if (event.opcode == AFX_OP_NOTE) {
             if (event.setup >= header->setup_count) return -1;
             if (ordinal_tick != tick) { ordinal_tick = tick; ordinal = 0; }
             resolved_params(profile, event.setup, tick, ordinal++, event.channel, &active[event.channel]);
-            event_params(&event, values, &active[event.channel]); active_note[event.channel] = true; ++commands; writes += 19;
+            for (uint32_t i = 0; i < profile->lane_count; ++i) {
+                lane_t *lane = &profile->lanes[i];
+                if (lane->tick != tick || lane->ordinal != ordinal - 1u || lane->channel != event.channel) continue;
+                if (lane->pending || lane->used || lane->offset > UINT32_MAX - tick) return -1;
+                if (!lane->offset) { params_merge(&active[event.channel], &lane->parameters); lane->used = true; }
+                else { lane->pending_tick = tick + lane->offset; lane->pending = true; }
+            }
+            event_params(&event, values, &active[event.channel]); active_note[event.channel] = true;
+            ++commands; writes += 19;
         } else if (event.opcode == AFX_OP_PATCH) { if (active_note[event.channel]) event_params(&event, values, &active[event.channel]); ++commands; writes += afx_field_value_bytes(event.mask) / 2u; }
         else if (event.opcode == AFX_OP_KEYOFF) { ++commands; ++writes; active_note[event.channel] = false; }
         if (commands > AFX_EXECUTION_BUDGET_COMMANDS || writes > AFX_EXECUTION_BUDGET_WRITES || bytes_event(stream, &event, values)) return -1;
     }
     if (commands > *max_commands) *max_commands = commands; if (writes > *max_writes) *max_writes = writes;
     for (uint32_t i = 0; i < profile->override_count; ++i) if (!profile->overrides[i].used) return -1;
+    for (uint32_t i = 0; i < profile->lane_count; ++i) if (!profile->lanes[i].used || profile->lanes[i].pending) return -1;
     return 0;
 }
 static int valid_seek(const uint8_t *afc, uint32_t bytes, const afx_file_header_t *header) {
@@ -386,16 +495,47 @@ static int profile_effect(const profile_t *profile) {
     if (profile->defaults.mask) return 1;
     for (uint32_t i = 0; i < profile->setup_count; ++i) if (profile->setup_templates[i][0] && find_template((profile_t *)profile, profile->setup_templates[i])->parameters.mask) return 1;
     for (uint32_t i = 0; i < profile->override_count; ++i) if (profile->overrides[i].parameters.mask || (profile->overrides[i].has_template && find_template((profile_t *)profile, profile->overrides[i].template_name)->parameters.mask)) return 1;
+    if (profile->lane_count) return 1;
     return 0;
 }
+
+/* A profile default applies to every use of a setup.  Setup-resident fields
+ * therefore belong in the setup dictionary, not in every NOTE command: that
+ * preserves the ARM7 per-tick command budget for dense orchestral scores. */
+static void apply_static_defaults(uint8_t *image, const afx_file_header_t *header,
+                                  const params_t *parameters) {
+    for (uint32_t setup = 0; setup < header->setup_count; ++setup)
+        for (uint32_t field = 0; field < AFX_FIELD_COUNT; ++field)
+            if (parameters->mask & (1u << field))
+                afx_write16(image + setup * AFX_SETUP_BYTES + 2u * field, parameters->values[field]);
+}
+
 static int apply(const char *base_path, const char *base_afc_path, const char *profile_path, const char *out_path, const char *out_afc_path) {
-    uint8_t *afx = NULL, *afc = NULL, *derived = NULL, *derived_afc = NULL; uint32_t afx_bytes, afc_bytes, derived_bytes, derived_afc_bytes, commands, writes; afx_file_header_t header; profile_t profile; bytes_t stream = {0}; int result = -1;
+    uint8_t *afx = NULL, *afc = NULL, *derived = NULL, *derived_afc = NULL; uint32_t afx_bytes, afc_bytes, derived_bytes, derived_afc_bytes, commands, writes; afx_file_header_t header; profile_t profile; params_t static_defaults; bytes_t stream = {0}; int result = -1;
     if (read_file(base_path, &afx, &afx_bytes) || read_file(base_afc_path, &afc, &afc_bytes) || afx_file_validate(afx, afx_bytes, &header) || !valid_seek(afc, afc_bytes, &header) || profile_read(profile_path, afx, afx_bytes, header.setup_count, &profile)) goto done;
-    if (!profile_effect(&profile)) { result = write_file(out_path, afx, afx_bytes) || write_file(out_afc_path, afc, afc_bytes); goto done; }
+    static_defaults = profile.defaults;
+    /* Pitch and MIX are supplied by each NOTE. All other public profile
+       parameters are fields of the immutable setup template. */
+    static_defaults.mask &= ~((1u << AFX_FIELD_PITCH) | (1u << AFX_FIELD_MIX));
+    profile.defaults.mask &= ~static_defaults.mask;
+    if (!static_defaults.mask && !profile_effect(&profile)) { result = write_file(out_path, afx, afx_bytes) || write_file(out_afc_path, afc, afc_bytes); goto done; }
+    if (!profile_effect(&profile)) {
+        derived = malloc(afx_bytes);
+        if (!derived) goto done;
+        memcpy(derived, afx, afx_bytes);
+        apply_static_defaults(derived + header.image_offset, &header, &static_defaults);
+        header.control_id = afx_control_id(derived + header.image_offset, header.image_size);
+        afx_encode_header(derived, &header);
+        if (afx_file_validate(derived, afx_bytes, NULL) ||
+            !(derived_afc = build_seek(&header, header.control_id, &derived_afc_bytes)) ||
+            write_file(out_path, derived, afx_bytes) || write_file(out_afc_path, derived_afc, derived_afc_bytes)) goto done;
+        result = 0; goto done;
+    }
     if (rewrite_stream(afx + header.image_offset, &header, &profile, &stream, &commands, &writes) || stream.used > UINT32_MAX - header.image_offset - header.stream_offset) goto done;
     header.stream_size = stream.used; header.image_size = header.stream_offset + stream.used; header.total_size = header.image_offset + header.image_size; header.work_profile = AFX_WORK_PROFILE(commands, writes);
     derived_bytes = header.total_size; derived = calloc(1, derived_bytes); if (!derived) goto done;
     memcpy(derived, afx, header.image_offset + header.stream_offset); memcpy(derived + header.image_offset + header.stream_offset, stream.data, stream.used);
+    apply_static_defaults(derived + header.image_offset, &header, &static_defaults);
     header.control_id = afx_control_id(derived + header.image_offset, header.image_size); afx_encode_header(derived, &header);
     if (afx_file_validate(derived, derived_bytes, NULL) || !(derived_afc = build_seek(&header, header.control_id, &derived_afc_bytes)) || write_file(out_path, derived, derived_bytes) || write_file(out_afc_path, derived_afc, derived_afc_bytes)) goto done;
     result = 0;
@@ -419,6 +559,151 @@ static int inventory(const char *path) {
     }
     puts("]"); free(afx); return 0;
 }
+static int identity_push(note_identity_t **items, uint32_t *count, uint32_t *capacity,
+                         note_identity_t item) {
+    if (*count == *capacity) {
+        uint32_t grown_capacity = *capacity ? *capacity * 2u : 256u;
+        note_identity_t *grown = realloc(*items, (size_t)grown_capacity * sizeof(*grown));
+        if (!grown) return -1;
+        *items = grown; *capacity = grown_capacity;
+    }
+    (*items)[(*count)++] = item; return 0;
+}
+static int note_identities(const uint8_t *image, const afx_file_header_t *header,
+                           note_identity_t **out, uint32_t *out_count) {
+    note_identity_t *items = NULL; uint32_t count = 0, capacity = 0, tick = 0, ordinal = 0, ordinal_tick = UINT32_MAX;
+    uint32_t active[AFX_MAX_FLOW_CHANNELS];
+    for (uint32_t channel = 0; channel < AFX_MAX_FLOW_CHANNELS; ++channel) active[channel] = UINT32_MAX;
+    for (uint32_t at = header->stream_offset, end = at + header->stream_size; at < end;) {
+        afx_event_t event;
+        if (afx_decode_event(image + at, end - at, &event)) goto failed;
+        at += event.bytes;
+        if (event.opcode >= AFX_OP_WAIT8 && event.opcode <= AFX_OP_WAIT32) tick += event.wait;
+        else if (event.opcode == AFX_OP_NOTE) {
+            uint16_t state[AFX_FIELD_COUNT];
+            if (ordinal_tick != tick) { ordinal_tick = tick; ordinal = 0; }
+            if (event.setup >= header->setup_count || afx_apply_setup_fields(state, image + event.setup * AFX_SETUP_BYTES,
+                event.mask, event.values, afx_field_value_bytes(event.mask))) goto failed;
+            note_identity_t item = {.tick = tick, .ordinal = ordinal++, .channel = event.channel};
+            memcpy(item.state, state, sizeof(item.state));
+            if (identity_push(&items, &count, &capacity, item)) goto failed;
+            active[event.channel] = count - 1u;
+        } else if (event.opcode == AFX_OP_KEYOFF) {
+            if (active[event.channel] == UINT32_MAX) goto failed;
+            items[active[event.channel]].end_tick = tick; active[event.channel] = UINT32_MAX;
+        }
+    }
+    for (uint32_t channel = 0; channel < AFX_MAX_FLOW_CHANNELS; ++channel)
+        if (active[channel] != UINT32_MAX) goto failed;
+    *out = items; *out_count = count; return 0;
+failed:
+    free(items); return -1;
+}
+
+static int same_note_signature(const note_identity_t *identity, const uint16_t state[AFX_FIELD_COUNT]) {
+    /* AFP is allowed to replace the NOTE's articulation and mix fields, so
+     * lane export can identify the same source voice only by its immutable
+     * sample loop and pitch.  This also permits exporting a profile that
+     * already folded an offset-zero mix lane into NOTE. */
+    static const uint8_t fields[] = {AFX_FIELD_LOOP_START, AFX_FIELD_LOOP_END,
+                                     AFX_FIELD_PITCH};
+    for (uint32_t i = 0; i < sizeof(fields); ++i)
+        if (identity->state[fields[i]] != state[fields[i]]) return 0;
+    return 1;
+}
+static int lane_export_push(lane_t **items, uint32_t *count, uint32_t *capacity,
+                            const note_identity_t *identity, uint32_t offset, const afx_event_t *event) {
+    lane_t *lane;
+    if (!event->mask || *count == UINT32_MAX) return -1;
+    if (*count == *capacity) {
+        uint32_t grown_capacity = *capacity ? *capacity * 2u : 256u;
+        lane_t *grown = realloc(*items, (size_t)grown_capacity * sizeof(*grown));
+        if (!grown) return -1;
+        *items = grown; *capacity = grown_capacity;
+    }
+    lane = &(*items)[(*count)++]; *lane = (lane_t){.tick = identity->tick, .ordinal = identity->ordinal,
+        .channel = identity->channel, .offset = offset};
+    for (uint32_t field = 0; field < AFX_FIELD_COUNT; ++field)
+        if (event->mask & (1u << field)) {
+            if (!field_name(field)) return -1;
+            lane->parameters.mask |= 1u << field;
+            lane->parameters.values[field] = afx_read16(event->values + afx_field_value_bytes(event->mask & ((1u << field) - 1u)));
+        }
+    return 0;
+}
+static int print_params(FILE *file, const params_t *parameters) {
+    int first = 1;
+    if (fputs("{ ", file) == EOF) return -1;
+    for (uint32_t field = 0; field < AFX_FIELD_COUNT; ++field) if (parameters->mask & (1u << field)) {
+        const char *name = field_name(field);
+        if (!name || fprintf(file, "%s\"%s\": %u", first ? "" : ", ", name, parameters->values[field]) < 0) return -1;
+        first = 0;
+    }
+    return fputs(" }", file) == EOF ? -1 : 0;
+}
+/* Migrate a validated historical AFX into explicit AFP lanes.  It binds each
+ * old PATCH to the same source NOTE ordinal in the new base, so allocator
+ * channel choices may differ without changing the intended sounding note. */
+static int export_lanes(const char *reference_path, const char *base_path, const char *output_path,
+                        const char *preset, unsigned send, unsigned tempo) {
+    uint8_t *reference = NULL, *base = NULL; uint32_t reference_bytes, base_bytes, at, end, tick = 0, matched = 0, reference_cursor = 0;
+    afx_file_header_t reference_header, base_header; note_identity_t *identities = NULL, *reference_identities = NULL;
+    uint32_t identity_count = 0, reference_identity_count = 0;
+    lane_t *lanes = NULL; uint32_t lane_count = 0, lane_capacity = 0, active[AFX_MAX_FLOW_CHANNELS]; char sha[65]; FILE *file = NULL; int result = -1;
+    if (!valid_preset(preset) || send > 255 || tempo < 16 || tempo > 4096 || ((!strcmp(preset, "dry")) != (send == 0)) ||
+        read_file(reference_path, &reference, &reference_bytes) || read_file(base_path, &base, &base_bytes) ||
+        afx_file_validate(reference, reference_bytes, &reference_header) || afx_file_validate(base, base_bytes, &base_header) ||
+        reference_header.tick_rate_num != base_header.tick_rate_num || reference_header.tick_rate_den != base_header.tick_rate_den ||
+        note_identities(base + base_header.image_offset, &base_header, &identities, &identity_count) ||
+        note_identities(reference + reference_header.image_offset, &reference_header, &reference_identities,
+                        &reference_identity_count) || identity_count != reference_identity_count) goto done;
+    for (uint32_t channel = 0; channel < AFX_MAX_FLOW_CHANNELS; ++channel) active[channel] = UINT32_MAX;
+    for (at = reference_header.stream_offset, end = at + reference_header.stream_size; at < end;) {
+        afx_event_t event;
+        if (afx_decode_event(reference + reference_header.image_offset + at, end - at, &event)) goto done;
+        at += event.bytes;
+        if (event.opcode >= AFX_OP_WAIT8 && event.opcode <= AFX_OP_WAIT32) { tick += event.wait; continue; }
+        if (event.opcode == AFX_OP_NOTE) {
+            uint32_t index = 0, best_distance = UINT32_MAX;
+            if (reference_cursor == reference_identity_count || reference_identities[reference_cursor].tick != tick ||
+                reference_identities[reference_cursor].channel != event.channel) goto done;
+            const note_identity_t *source = reference_identities + reference_cursor++;
+            for (; index < identity_count; ++index) {
+                if (identities[index].claimed || identities[index].tick != tick ||
+                    !same_note_signature(identities + index, source->state)) continue;
+                uint32_t distance = identities[index].end_tick > source->end_tick ?
+                    identities[index].end_tick - source->end_tick : source->end_tick - identities[index].end_tick;
+                if (distance < best_distance) { best_distance = distance; active[event.channel] = index; }
+            }
+            index = active[event.channel];
+            if (index == UINT32_MAX) goto done;
+            identities[index].claimed = 1; ++matched;
+        } else if (event.opcode == AFX_OP_KEYOFF) active[event.channel] = UINT32_MAX;
+        else if (event.opcode == AFX_OP_PATCH && event.mask) {
+            uint32_t index = active[event.channel];
+            if (index == UINT32_MAX || tick < identities[index].tick ||
+                lane_export_push(&lanes, &lane_count, &lane_capacity, &identities[index], tick - identities[index].tick, &event)) goto done;
+        }
+    }
+    if (matched != identity_count || reference_cursor != reference_identity_count) goto done;
+    digest(base, base_bytes, sha); file = fopen(output_path, "w");
+    if (!file || fprintf(file, "{\n  \"format\": \"aicaflow.afp\",\n  \"version\": %u,\n"
+                         "  \"base\": { \"afx_version\": %u, \"canonical_sha256\": \"%s\" },\n"
+                         "  \"dsp\": { \"preset\": \"%s\" },\n  \"tempo_q8_8\": %u,\n  \"defaults\": ",
+                         PROFILE_VERSION, AFX_FILE_VERSION, sha, preset, tempo) < 0 ||
+        (send && fprintf(file, "{ \"dsp_send\": %u }", send) < 0) || (!send && fputs("{}", file) == EOF) ||
+        fputs(",\n  \"templates\": {},\n  \"setup_templates\": {},\n  \"overrides\": [],\n  \"lanes\": [\n", file) == EOF) goto done;
+    for (uint32_t i = 0; i < lane_count; ++i) {
+        lane_t *lane = &lanes[i];
+        if (fprintf(file, "%s    { \"event\": { \"kind\": \"note\", \"tick\": %u, \"ordinal\": %u, \"channel\": %u }, \"offset\": %u, \"parameters\": ",
+                    i ? ",\n" : "", lane->tick, lane->ordinal, lane->channel, lane->offset) < 0 ||
+            print_params(file, &lane->parameters) || fputs(" }", file) == EOF) goto done;
+    }
+    if (fputs("\n  ]\n}\n", file) == EOF || fclose(file)) { file = NULL; goto done; }
+    file = NULL; result = 0;
+done:
+    if (file) fclose(file); free(lanes); free(reference_identities); free(identities); free(reference); free(base); return result;
+}
 int main(int argc, char **argv) {
     if (argc == 6 && !strcmp(argv[1], "init")) {
         uint8_t *afx; uint32_t bytes;
@@ -437,7 +722,11 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && !strcmp(argv[1], "inventory"))
         return inventory(argv[2]) ? fprintf(stderr, "cannot inspect AFX\n"), 1 : 0;
+    if ((argc == 7 || argc == 8) && !strcmp(argv[1], "export-lanes"))
+        return export_lanes(argv[2], argv[3], argv[4], argv[5], (unsigned)strtoul(argv[6], NULL, 10),
+                            argc == 8 ? (unsigned)strtoul(argv[7], NULL, 10) : 256) ?
+               fprintf(stderr, "cannot export lanes\n"), 1 : 0;
     if (argc == 7 && !strcmp(argv[1], "apply"))
         return apply(argv[2], argv[3], argv[4], argv[5], argv[6]) ? fprintf(stderr, "cannot apply profile\n"), 1 : 0;
-    return fprintf(stderr, "usage: %s init base.afx output.afp preset send | inventory base.afx | describe base.afx profile.afp | apply base.afx base.afc profile.afp output.afx output.afc\n", argv[0]), 2;
+    return fprintf(stderr, "usage: %s init base.afx output.afp preset send | inventory base.afx | describe base.afx profile.afp | export-lanes old.afx base.afx output.afp preset send [tempo] | apply base.afx base.afc profile.afp output.afx output.afc\n", argv[0]), 2;
 }
