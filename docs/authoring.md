@@ -95,7 +95,7 @@ build/afx_compile song.mid --zones instrument.zones song.afb song.afx
 
 ## SoundFonts and bank maps
 
-For SoundFont input, no Python package is needed. The C reader uses each
+For SoundFont input, the reader uses each
 note's MIDI bank/program to select SF2 preset and instrument zones. The
 requested encoding is explicit; `auto` chooses the smallest format passing the
 same deterministic quality gate as zone maps (and conservatively skips ADPCM
@@ -174,12 +174,11 @@ such as melodic strings and percussion. A channel-specific map wins over the
 generic rule for the same song and program; a song-specific generic rule wins
 over `*`.
 
-For a declared historic rendition, `humanize <song> <seed> <level-centibels>
+The optional `humanize <song> <seed> <level-centibels>
 <shorten-ms> <lfo-rate-steps>` may follow its `song` line in the AFBM. It is a
 deterministic offline lowering step: it modifies NOTE level and KEYOFF timing,
-but adds no SH4 or ARM7 feature. New rhythmic edits should instead live in the
-MIDI source; the directive is retained solely where it captures an already
-approved rendering. Native parity currently requires `lfo-rate-steps=0`.
+but adds no SH4 or ARM7 feature. `lfo-rate-steps` must be `0`; rate variation
+is not implemented. Put deliberate rhythmic edits in the MIDI source.
 
 ## Performance profiles
 
@@ -299,6 +298,5 @@ chip emulator: YM2612, PSG and arbitrary chips are not supported by this tool.
   and runtime. A valid standalone asset can still fail to fit with other live
   banks or DSP reservations. See [Memory](memory.md) and [Testing](testing.md).
 
-The public validator and shared emitter, not historic Python or an old branch,
-define the supported output contract. [Authoring parity](authoring-parity.md)
-records comparison evidence without claiming unimplemented features.
+The public validator and shared emitter enforce the output contract described
+in the [format reference](specs/assets.md).

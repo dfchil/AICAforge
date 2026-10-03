@@ -30,8 +30,8 @@ build/afx_profile describe song.afx song.afp
 turns an ABI-7 reference flow's sustained `PATCH` commands into an editable
 profile bound to `base.afx`. It follows the source NOTE order, rather than
 copying allocator channel numbers, so it is useful when a rebuilt bank changes
-voice allocation. It is a host migration aid; the generated profile and normal
-`apply` path remain the only runtime-facing representation.
+voice allocation. Use `apply` to compile those profile lanes into ordinary
+AFX commands; no profile is interpreted at runtime.
 
 `inventory` is a read-only selector list for an editor or a human author. It
 keeps the profile itself compact: a template is not repeated for every note it
@@ -85,8 +85,8 @@ An [AFSFX map](../../docs/specs/afsfx.md) can drive application grouping, but
 neither native tool currently reads it; that reader is in DKR. OoT AudioSeq
 is separate research tooling, not a supported `afx_n64` mode.
 
-The SFX path preserves the accepted N64/Python sample policy: try the source
-rate and lower 16/11.025/8 kHz candidates, then select the smallest coding
+The SFX path tries the source rate and lower 16/11.025/8 kHz candidates,
+then selects the smallest coding
 whose decoded, resampled result meets 30 dB full-sample and 24 dB attack SNR
 against the original. Loops use PCM8 or PCM16, never ADPCM. Negative N64 decay
 means no AICA decay; finite components still get KEYOFF even in a chain with

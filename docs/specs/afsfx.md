@@ -210,8 +210,8 @@ make -f Makefile.dc aicaflow-fallback-verify
 The first check validates membership, masks, scene sizes and basic AFB/AFX
 file ranges. It does not recompile/recompare source audio or prove that an ID
 is the sound a human intended. Fallback verification checks recorded file
-lengths and SHA-256 values. Source/register parity is a separate check;
-see [Authoring parity](../authoring-parity.md).
+lengths and SHA-256 values. Test source interpretation and audible behavior
+separately; see [Testing](../testing.md).
 
 When editing a map, resolve raw IDs from the source, regenerate with the
 application build, inspect pack memory costs and test the relevant scene and
