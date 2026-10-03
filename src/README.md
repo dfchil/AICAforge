@@ -56,6 +56,17 @@ the AL envelope, key/velocity region, root key, detune, pan, CC91 send and
 VADPCM/RAW16 sample meaning offline. Infinite CSeq loops end at their first
 boundary because the emitted AFX remains finite.
 
+The same C program lowers one ALBank sound-chain for games that use N64 SFX:
+
+```sh
+build/afx_n64 --sfx audio_control.bin audio_table.bin 563 collect_item.afx
+```
+
+It writes the matching `collect_item.afb` and `.afx`. A sustained N64 loop is
+marked `PARK`/controlled so the game, rather than an invented duration, owns
+its lifetime. SFX do not need an AFC seek sidecar. `afx_bank --merge` accepts
+such AFX/AFB pairs and rewrites them into one shared SFX bank.
+
 `afx_vgm` follows that identical final pipeline for Sega MultiPCM VGM/VGZ
 captures. Its source register writes become raw NOTE/PATCH/KEYOFF events; the
 same optimizer handles its setup dictionary and the same emitter writes the

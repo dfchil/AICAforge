@@ -630,18 +630,26 @@ static int read_bank_bound_flow(merge_flow_t *flow) {
     if (read_file(flow->path, &flow->afx, &flow->afx_bytes) ||
         afx_file_validate(flow->afx, flow->afx_bytes, &flow->header) ||
         sibling_path(flow->path, ".afb", bank_path) || sibling_path(flow->path, ".afc", seek_path) ||
-        read_file(bank_path, &flow->afb, &flow->afb_bytes) || read_file(seek_path, &flow->afc, &flow->afc_bytes)) return -1;
+        read_file(bank_path, &flow->afb, &flow->afb_bytes)) return -1;
+    /* One-shot SFX do not seek.  Their AFX/AFB pair is still a normal merge
+       input; do not force an otherwise useless AFC sidecar on that path. */
+    FILE *seek = fopen(seek_path, "rb");
+    if (seek) {
+        fclose(seek);
+        if (read_file(seek_path, &flow->afc, &flow->afc_bytes)) return -1;
+    }
     data_at = afx_read32(flow->afb + 16); payload_bytes = afx_read32(flow->afb + 20); total = afx_read32(flow->afb + 24);
     if (flow->afb_bytes < AFX_BANK_HEADER_BYTES || afx_read32(flow->afb) != AFX_BANK_MAGIC ||
         afx_read32(flow->afb + 4) != AFX_BANK_VERSION || data_at != AFX_BANK_HEADER_BYTES ||
         total != flow->afb_bytes || payload_bytes != flow->afb_bytes - data_at ||
         afx_read32(flow->afb + 8) != flow->header.bank_id_low ||
         afx_read32(flow->afb + 12) != flow->header.bank_id_high ||
-        flow->afc_bytes < AFX_SEEK_HEADER_BYTES || afx_read32(flow->afc) != AFX_SEEK_MAGIC ||
-        afx_read32(flow->afc + 4) != AFX_SEEK_VERSION || afx_read32(flow->afc + 8) != flow->header.control_id ||
-        afx_read32(flow->afc + 12) != flow->header.bank_id_low || afx_read32(flow->afc + 16) != flow->header.bank_id_high ||
-        afx_read32(flow->afc + 20) != AFX_SEEK_HEADER_BYTES || afx_read32(flow->afc + 24) != flow->afc_bytes - AFX_SEEK_HEADER_BYTES ||
-        afx_read32(flow->afc + 28) != flow->afc_bytes) return -1;
+        (flow->afc && (flow->afc_bytes < AFX_SEEK_HEADER_BYTES || afx_read32(flow->afc) != AFX_SEEK_MAGIC ||
+                       afx_read32(flow->afc + 4) != AFX_SEEK_VERSION || afx_read32(flow->afc + 8) != flow->header.control_id ||
+                       afx_read32(flow->afc + 12) != flow->header.bank_id_low || afx_read32(flow->afc + 16) != flow->header.bank_id_high ||
+                       afx_read32(flow->afc + 20) != AFX_SEEK_HEADER_BYTES ||
+                       afx_read32(flow->afc + 24) != flow->afc_bytes - AFX_SEEK_HEADER_BYTES ||
+                       afx_read32(flow->afc + 28) != flow->afc_bytes))) return -1;
     flow->sample_for_setup = calloc(flow->header.setup_count, sizeof(*flow->sample_for_setup));
     return flow->sample_for_setup ? 0 : -1;
 }
@@ -787,8 +795,10 @@ static int merge_final_banks(const char *bank_path, const char *controls_dir, in
         afx_write32(rewritten + 40, bank_low); afx_write32(rewritten + 44, bank_high);
         uint32_t control_id = afx_control_id(rewritten + flow->header.image_offset, flow->header.image_size);
         afx_write32(rewritten + 32, control_id);
-        if (afx_file_validate(rewritten, flow->afx_bytes, NULL) || rewrite_seek(flow, samples, bank_low, bank_high, control_id, &seek, &seek_bytes) ||
-            write_file(afx_path, rewritten, flow->afx_bytes) || write_file(afc_path, seek, seek_bytes)) {
+        if (afx_file_validate(rewritten, flow->afx_bytes, NULL) ||
+            (flow->afc && rewrite_seek(flow, samples, bank_low, bank_high, control_id, &seek, &seek_bytes)) ||
+            write_file(afx_path, rewritten, flow->afx_bytes) ||
+            (flow->afc && write_file(afc_path, seek, seek_bytes))) {
             free(rewritten); free(seek); goto done;
         }
         free(rewritten); free(seek);
