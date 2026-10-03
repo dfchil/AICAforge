@@ -21,6 +21,13 @@ int n64_vadpcm_decode(const uint8_t *data, int data_len, const int16_t *coef,
 typedef struct { const uint8_t *control, *table; uint32_t control_bytes, table_bytes, bank, rate, percussion; int instruments; } bank_t;
 typedef struct { uint32_t wavetable; afx_c_sample_t sample; uint8_t *data; } cached_sample_t;
 typedef struct { uint32_t envelope, keymap, wavetable; uint8_t pan, volume; } sound_t;
+typedef struct {
+    afx_c_note_t note;
+    uint8_t source_channel, channel_volume, channel_pan, sample_pan, reverb;
+    int16_t bend, bend_range;
+    uint32_t source_start, source_release;
+} n64_note_t;
+typedef struct { uint32_t instrument; uint8_t volume, pan, reverb; int16_t bend, bend_range; } channel_state_t;
 
 static uint16_t be16(const uint8_t *p) { return (uint16_t)p[0] << 8 | p[1]; }
 static int16_t sbe16(const uint8_t *p) { return (int16_t)be16(p); }
@@ -75,6 +82,25 @@ static int bank_instrument(const bank_t *bank, uint8_t program, int percussion, 
         sbe16(bank->control + at + 14u) > 1024 ||
         !within(at + 16u, bank->control_bytes, (uint32_t)sbe16(bank->control + at + 14u) * 4u)) return -1;
     *out = at; return 0;
+}
+
+static int bank_program_instrument(const bank_t *bank, uint8_t program, int percussion, uint32_t *out) {
+    uint32_t at = percussion && bank->percussion ? bank->percussion :
+                  (program < bank->instruments ? be32(bank->control + bank->bank + 12u + program * 4u) : 0);
+    if (!at || !within(at, bank->control_bytes, 16) || sbe16(bank->control + at + 14u) < 1 ||
+        sbe16(bank->control + at + 14u) > 1024 ||
+        !within(at + 16u, bank->control_bytes, (uint32_t)sbe16(bank->control + at + 14u) * 4u)) return -1;
+    *out = at; return 0;
+}
+
+static int set_channel_instrument(const bank_t *bank, channel_state_t *state, uint8_t program, int percussion) {
+    uint32_t instrument;
+    if (bank_program_instrument(bank, program, percussion, &instrument)) return -1;
+    state->instrument = instrument;
+    state->volume = bank->control[instrument];
+    state->pan = bank->control[instrument + 1u];
+    state->bend_range = sbe16(bank->control + instrument + 12u);
+    return 0;
 }
 
 static int select_sound(const bank_t *bank, uint32_t instrument, uint8_t key, uint8_t velocity,
@@ -168,15 +194,12 @@ static int envelope_rate(int32_t microseconds, const double table[64]) {
     return best;
 }
 
-static uint16_t mix_word(const afx_c_note_t *note, uint8_t instrument_volume, uint8_t sample_volume,
+static uint16_t mix_word(uint8_t velocity, uint8_t channel_volume, uint8_t sample_volume,
                          uint8_t attack_volume, uint8_t pan) {
-    unsigned volume = (note->controller_state >> 4) & 127u, expression = (note->controller_state >> 11) & 127u;
-    double attenuation = -2000.0 * log10((double)(instrument_volume ? instrument_volume : 1u) *
+    double attenuation = -2000.0 * log10((double)(channel_volume ? channel_volume : 1u) *
                                          (sample_volume ? sample_volume : 1u) * (attack_volume ? attack_volume : 1u) /
                                          (127.0 * 127.0 * 127.0));
-    attenuation += -300.0 * log10((double)note->velocity / 127.0);
-    if (!volume || !expression) attenuation = 10200.0;
-    else attenuation += -2000.0 * log10((double)volume * expression / (127.0 * 127.0));
+    attenuation += -300.0 * log10((double)velocity / 127.0);
     double pan_cents = ((int)pan - 64) * 500.0 / 63.0;
     if (pan_cents < -500) pan_cents = -500; if (pan_cents > 500) pan_cents = 500;
     double position = (pan_cents + 500) * acos(-1.0) / 2000.0;
@@ -204,15 +227,46 @@ static int append_zone(afx_c_zone_t **zones, uint32_t *count, uint32_t *capacity
     (*zones)[(*count)++] = zone; return 0;
 }
 
-static int lower(const bank_t *bank, afx_c_note_t *input, uint32_t input_count,
-                 afx_c_note_t **out_notes, uint32_t *out_count, afx_c_zone_t **out_zones, uint32_t *out_zone_count) {
-    afx_c_note_t *notes = calloc(input_count, sizeof(*notes)); afx_c_zone_t *zones = NULL;
+static int source_before(uint32_t tick, uint32_t track, uint32_t order, const afx_c_note_t *note) {
+    return tick < note->source_tick ||
+           (tick == note->source_tick && (track < note->source_track ||
+            (track == note->source_track && order < note->source_order)));
+}
+
+static int lower(const bank_t *bank, const afx_c_note_t *input, uint32_t input_count,
+                 const afx_n64_automation_t *automation, uint32_t automation_count,
+                 n64_note_t **out_notes, uint32_t *out_count, afx_c_zone_t **out_zones, uint32_t *out_zone_count) {
+    n64_note_t *notes = calloc(input_count, sizeof(*notes)); afx_c_zone_t *zones = NULL;
     cached_sample_t *cache = NULL; uint32_t note_count = 0, zone_count = 0, zone_capacity = 0, cache_count = 0, cache_capacity = 0;
+    channel_state_t channels[16] = {{0}};
+    uint32_t cursor = 0;
     if (!notes) goto failed;
+    for (uint32_t channel = 0; channel < 16; ++channel) {
+        if (bank_instrument(bank, 0, channel == 9, &channels[channel].instrument)) goto failed;
+        channels[channel].volume = bank->control[channels[channel].instrument];
+        channels[channel].pan = bank->control[channels[channel].instrument + 1u];
+        channels[channel].bend_range = sbe16(bank->control + channels[channel].instrument + 12u);
+    }
     for (uint32_t index = 0; index < input_count; ++index) {
-        afx_c_note_t note = input[index]; uint32_t instrument; sound_t sound; uint8_t ivolume, ipan;
-        if (bank_instrument(bank, note.program, (note.controller_state & 15u) == 9u, &instrument)) goto failed;
-        int selected = select_sound(bank, instrument, note.key, note.velocity, &sound, &ivolume, &ipan);
+        const afx_c_note_t *source = input + index;
+        uint8_t channel = (uint8_t)(source->controller_state & 15u);
+        while (cursor < automation_count && source_before(automation[cursor].source_tick,
+               automation[cursor].source_track, automation[cursor].source_order, source)) {
+            const afx_n64_automation_t *event = automation + cursor++;
+            channel_state_t *state = channels + event->channel;
+            if (event->kind == AFX_N64_EVENT_PROGRAM) {
+                /* libultra uses percussion only for channel 9's initial
+                 * state; an explicit program change always selects instArray. */
+                if (set_channel_instrument(bank, state, event->value, 0)) goto failed;
+            } else if (event->kind == AFX_N64_EVENT_CONTROL) {
+                if (event->control == 7) state->volume = event->value;
+                else if (event->control == 10) state->pan = event->value;
+                else if (event->control == 91) state->reverb = event->value;
+            } else if (event->kind == AFX_N64_EVENT_PITCH) state->bend = event->pitch_bend;
+        }
+        channel_state_t *state = channels + channel;
+        afx_c_note_t note = *source; sound_t sound; uint8_t ignored_volume, ignored_pan;
+        int selected = select_sound(bank, state->instrument, note.key, note.velocity, &sound, &ignored_volume, &ignored_pan);
         if (selected > 0) continue;
         if (selected < 0) goto failed;
         const afx_c_sample_t *sample;
@@ -221,12 +275,12 @@ static int lower(const bank_t *bank, afx_c_note_t *input, uint32_t input_count,
         uint8_t attack_volume = env[12] ? env[12] : 1, decay_volume = env[13] ? env[13] : 1;
         int decay_level = (int)lround(-20.0 * log10((double)decay_volume / attack_volume) / 3.0103);
         if (decay_level < 0) decay_level = 0; if (decay_level > 31) decay_level = 31;
-        int channel_pan = (int)((note.controller_state >> 18) & 127u) + ipan - 64 + sound.pan - 64;
+        int channel_pan = (int)state->pan + sound.pan - 64;
         if (channel_pan < 0) channel_pan = 0; if (channel_pan > 127) channel_pan = 127;
         afx_c_zone_t zone = {.sample = *sample, .key_min = keymap[2], .key_max = keymap[3],
             .velocity_min = keymap[0], .velocity_max = keymap[1], .bank_msb = note.bank_msb,
             .bank_lsb = note.bank_lsb, .program = note.program,
-            .dsp_send = (uint8_t)(lround(note.controllers[91] * 15.0 / 127.0) << 4),
+            .dsp_send = (uint8_t)(lround(state->reverb * 15.0 / 127.0) << 4),
             .setup_mask = (1u << AFX_FIELD_ENV_AD) | (1u << AFX_FIELD_ENV_DR) | (1u << AFX_FIELD_DIRECT)};
         zone.sample.root_key = keymap[4]; zone.sample.tuning_cents = (int8_t)keymap[5];
         zone.setup[AFX_FIELD_ENV_AD] = (uint16_t)(envelope_rate(sbe32(env), ar_time_ms) |
@@ -234,9 +288,13 @@ static int lower(const bank_t *bank, afx_c_note_t *input, uint32_t input_count,
         zone.setup[AFX_FIELD_ENV_DR] = (uint16_t)(envelope_rate(sbe32(env + 8u), dr_time_ms) |
                                                    decay_level << 5 | 15 << 10);
         zone.setup[AFX_FIELD_DIRECT] = direct_word((uint8_t)channel_pan);
-        note.mix = mix_word(&note, ivolume, sound.volume, attack_volume, (uint8_t)channel_pan);
         if (append_zone(&zones, &zone_count, &zone_capacity, zone)) goto failed;
-        note.setup_index = (uint16_t)zone_count; notes[note_count++] = note;
+        note.setup_index = (uint16_t)zone_count;
+        note.source_id = note_count;
+        note.mix = mix_word(note.velocity, state->volume, sound.volume, attack_volume, (uint8_t)channel_pan);
+        notes[note_count++] = (n64_note_t){note, channel, state->volume, state->pan, sound.pan,
+                                           state->reverb, state->bend, state->bend_range,
+                                           note.start_tick, note.release_tick ? note.release_tick : note.end_tick};
     }
     if (!note_count) goto failed;
     *out_notes = notes; *out_count = note_count; *out_zones = zones; *out_zone_count = zone_count;
@@ -244,6 +302,109 @@ static int lower(const bank_t *bank, afx_c_note_t *input, uint32_t input_count,
 failed:
     if (cache) for (uint32_t i = 0; i < cache_count; ++i) free(cache[i].data);
     free(cache); free(notes); free(zones); return -1;
+}
+
+static uint16_t n64_pitch(const n64_note_t *note, const afx_c_zone_t *zone, int16_t bend) {
+    uint32_t rate = zone->sample.sample_rate ? zone->sample.sample_rate : 44100;
+    int cents = zone->sample.tuning_cents + (int)lround((double)bend * note->bend_range / 8192.0);
+    cents += (int)lround(1200.0 * log2((double)rate / 44100.0));
+    double ratio = pow(2.0, (((int)note->note.key - zone->sample.root_key) * 100.0 + cents) / 1200.0);
+    int octave = (int)floor(log2(ratio));
+    int fraction = (int)(1024.0 * (ratio / pow(2.0, octave) - 1.0));
+    if (octave < -8) octave = -8; if (octave > 7) octave = 7;
+    if (fraction < 0) fraction = 0; if (fraction > 1023) fraction = 1023;
+    return (uint16_t)(((octave & 15) << 11) | fraction);
+}
+
+static uint16_t mix_for_volume(const n64_note_t *note, uint8_t volume) {
+    uint16_t old = note->note.mix;
+    if (!volume) return 0xff24;
+    double change = -2000.0 * log10((double)volume / (note->channel_volume ? note->channel_volume : 1u));
+    int total = (old >> 8) + (int)lround(change / 40.0);
+    if (total < 0) total = 0; if (total > 255) total = 255;
+    return (uint16_t)(total << 8 | 0x24u);
+}
+
+static int append_event(afx_c_event_t **events, uint32_t *count, uint32_t *capacity, afx_c_event_t event) {
+    if (*count == *capacity) {
+        uint32_t next = *capacity ? *capacity * 2u : 256u;
+        afx_c_event_t *grown = realloc(*events, (size_t)next * sizeof(**events));
+        if (!grown) return -1;
+        *events = grown; *capacity = next;
+    }
+    (*events)[(*count)++] = event;
+    return 0;
+}
+
+static int compile_n64(n64_note_t *notes, uint32_t note_count,
+                       const afx_n64_automation_t *automation, uint32_t automation_count,
+                       uint32_t duration, afx_c_zone_t *zones, uint32_t zone_count,
+                       afx_c_output_t *out) {
+    afx_c_note_t *scheduled = NULL;
+    uint8_t *channels = NULL;
+    afx_c_event_t *events = NULL, *optimized = NULL;
+    afx_c_zone_t *templates = NULL;
+    uint32_t event_count = 0, event_capacity = 0, channel_count = 0, template_count = 0, order = 0, final_tick = duration;
+    if (!notes || !note_count || !zones || !zone_count || !out) return -1;
+    scheduled = malloc(note_count * sizeof(*scheduled)); channels = malloc(note_count);
+    if (!scheduled || !channels) goto failed;
+    for (uint32_t i = 0; i < note_count; ++i) scheduled[i] = notes[i].note;
+    if (afx_c_schedule_notes(scheduled, note_count, 4) ||
+        afx_c_assign_channels(scheduled, note_count, channels, &channel_count)) goto failed;
+    for (uint32_t i = 0; i < note_count; ++i) {
+        n64_note_t *note = notes + scheduled[i].source_id;
+        note->note = scheduled[i];
+        const afx_c_zone_t *zone = zones + note->note.setup_index - 1u;
+        afx_c_event_t event = {.tick = note->note.start_tick, .order = order++, .opcode = AFX_OP_NOTE,
+            .channel = channels[i], .setup = (uint16_t)(note->note.setup_index - 1u), .mask = AFX_NOTE_PL_MASK};
+        event.fields[AFX_FIELD_PITCH] = n64_pitch(note, zone, note->bend);
+        event.fields[AFX_FIELD_MIX] = note->note.mix;
+        if (append_event(&events, &event_count, &event_capacity, event) ||
+            append_event(&events, &event_count, &event_capacity, (afx_c_event_t){
+                .tick = note->note.release_tick ? note->note.release_tick : note->note.end_tick,
+                .order = order++, .opcode = AFX_OP_KEYOFF, .channel = channels[i]})) goto failed;
+        if (note->note.end_tick > final_tick) final_tick = note->note.end_tick;
+    }
+    for (uint32_t i = 0; i < automation_count; ++i) {
+        const afx_n64_automation_t *source = automation + i;
+        if (source->kind != AFX_N64_EVENT_PITCH &&
+            !(source->kind == AFX_N64_EVENT_CONTROL &&
+              (source->control == 7 || source->control == 10 || source->control == 91))) continue;
+        for (uint32_t n = 0; n < note_count; ++n) {
+            const n64_note_t *note = notes + n;
+            if (note->source_channel != source->channel || source->tick < note->source_start ||
+                source->tick >= note->source_release) continue;
+            uint32_t tick = source->tick > note->note.start_tick ? source->tick : note->note.start_tick;
+            uint32_t release = note->note.release_tick ? note->note.release_tick : note->note.end_tick;
+            if (tick >= release) continue;
+            afx_c_event_t event = {.tick = tick, .order = order++, .opcode = AFX_OP_PATCH,
+                .channel = 0};
+            /* Find the assigned AICA voice once; source_id is the stable map. */
+            for (uint32_t j = 0; j < note_count; ++j)
+                if (scheduled[j].source_id == note->note.source_id) { event.channel = channels[j]; break; }
+            if (source->kind == AFX_N64_EVENT_PITCH) {
+                event.mask = 1u << AFX_FIELD_PITCH;
+                event.fields[AFX_FIELD_PITCH] = n64_pitch(note, zones + note->note.setup_index - 1u, source->pitch_bend);
+            } else if (source->control == 7) {
+                event.mask = 1u << AFX_FIELD_MIX;
+                event.fields[AFX_FIELD_MIX] = mix_for_volume(note, source->value);
+            } else if (source->control == 10) {
+                int pan = (int)source->value + note->sample_pan - 64;
+                if (pan < 0) pan = 0; if (pan > 127) pan = 127;
+                event.mask = 1u << AFX_FIELD_DIRECT;
+                event.fields[AFX_FIELD_DIRECT] = direct_word((uint8_t)pan);
+            } else {
+                event.mask = 1u << AFX_FIELD_DSP_SEND;
+                event.fields[AFX_FIELD_DSP_SEND] = (uint16_t)(lround(source->value * 15.0 / 127.0) << 4);
+            }
+            if (append_event(&events, &event_count, &event_capacity, event)) goto failed;
+        }
+    }
+    if (afx_c_optimize_events(events, event_count, zones, zone_count, &optimized, &templates, &template_count) ||
+        afx_c_compile_events(optimized, event_count, final_tick, 1000, templates, template_count, out)) goto failed;
+    free(scheduled); free(channels); free(events); free(optimized); free(templates); return 0;
+failed:
+    free(scheduled); free(channels); free(events); free(optimized); free(templates); return -1;
 }
 
 /* Sound effects use the same ALBank samples as CSeq music, but an ALInstrument
@@ -404,14 +565,16 @@ int main(int argc, char **argv) {
     if (*end || index < 0) return 2;
     long bank_index = 0;
     if (argc == 7) { bank_index = strtol(argv[6], &end, 10); if (*end || bank_index < 0) return 2; }
-    uint8_t *control = NULL, *table = NULL, *sequence = NULL; uint32_t control_bytes, table_bytes, sequence_bytes, raw_count, duration, note_count, zone_count;
-    afx_c_note_t *raw = NULL, *notes = NULL; afx_c_zone_t *zones = NULL; afx_c_output_t output = {0}; bank_t bank; int status = 1;
+    uint8_t *control = NULL, *table = NULL, *sequence = NULL; uint32_t control_bytes, table_bytes, sequence_bytes, raw_count, automation_count, duration, note_count, zone_count;
+    afx_c_note_t *raw = NULL; afx_n64_automation_t *automation = NULL; n64_note_t *notes = NULL;
+    afx_c_zone_t *zones = NULL; afx_c_output_t output = {0}; bank_t bank; int status = 1;
     char *afb = NULL, *afc = NULL, *afv = NULL;
     if (read_file(argv[1], &control, &control_bytes) || read_file(argv[2], &table, &table_bytes) ||
         read_file(argv[3], &sequence, &sequence_bytes) || bank_open(&bank, control, control_bytes, table, table_bytes, (uint32_t)bank_index) ||
-        afx_c_n64_cseq_notes(sequence, sequence_bytes, (int)index, 1000, &raw, &raw_count, &duration) ||
-        lower(&bank, raw, raw_count, &notes, &note_count, &zones, &zone_count) ||
-        afx_c_compile_zones(notes, note_count, 1000, zones, zone_count, &output)) {
+        afx_c_n64_cseq_notes(sequence, sequence_bytes, (int)index, 1000, &raw, &raw_count,
+                             &automation, &automation_count, &duration) ||
+        lower(&bank, raw, raw_count, automation, automation_count, &notes, &note_count, &zones, &zone_count) ||
+        compile_n64(notes, note_count, automation, automation_count, duration, zones, zone_count, &output)) {
         fprintf(stderr, "afx_n64: invalid source or AICA limits exceeded\n"); goto done;
     }
     afb = with_suffix(argv[5], ".afb"); afc = with_suffix(argv[5], ".afc"); afv = with_suffix(argv[5], ".afv");
@@ -425,6 +588,6 @@ done:
         int first = 1; for (uint32_t j = 0; j < i; ++j) if (zones[j].sample.data == zones[i].sample.data) { first = 0; break; }
         if (first) free((void *)zones[i].sample.data);
     }
-    free(afb); free(afc); free(afv); afx_c_output_free(&output); free(control); free(table); free(sequence); free(raw); free(notes); free(zones);
+    free(afb); free(afc); free(afv); afx_c_output_free(&output); free(control); free(table); free(sequence); free(raw); free(automation); free(notes); free(zones);
     return status;
 }

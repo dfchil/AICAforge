@@ -175,11 +175,15 @@ static uint32_t control_tick(uint32_t tick, const source_event_t *events, uint32
 
 int afx_c_n64_cseq_notes(const uint8_t *sequence, uint32_t bytes, int sequence_index,
                          uint32_t tick_rate, afx_c_note_t **out_notes,
-                         uint32_t *out_count, uint32_t *out_duration) {
+                         uint32_t *out_count, afx_n64_automation_t **out_automation,
+                         uint32_t *out_automation_count, uint32_t *out_duration) {
     const uint8_t *data = sequence; uint32_t length = bytes, division;
     source_event_t *events = NULL; note_node_t *nodes = NULL;
+    afx_n64_automation_t *automation = NULL;
     uint32_t event_count = 0, event_capacity = 0, note_count = 0, note_capacity = 0, final_tick = 0;
-    if (!sequence || !bytes || !tick_rate || !out_notes || !out_count || !out_duration) return -1;
+    if (!sequence || !bytes || !tick_rate || !out_notes || !out_count || !out_automation ||
+        !out_automation_count || !out_duration) return -1;
+    *out_notes = NULL; *out_count = 0; *out_automation = NULL; *out_automation_count = 0;
     if (sequence_index >= 0) {
         if (bytes < 4 || data[0] != 'S' || data[1] != '1' || (uint32_t)sequence_index >= ((uint32_t)data[2] << 8 | data[3])) goto failed;
         uint32_t at = 4u + (uint32_t)sequence_index * 8u;
@@ -204,24 +208,38 @@ int afx_c_n64_cseq_notes(const uint8_t *sequence, uint32_t bytes, int sequence_i
      * direct compact-sequence semantics without writing an intermediate MIDI. */
     uint32_t track_order[16] = {0};
     for (uint32_t i = 0; i < event_count; ++i) events[i].order = track_order[events[i].track]++;
-    uint8_t program[16] = {0}, bank_msb[16] = {0}, bank_lsb[16] = {0}, volume[16], expression[16], pan[16];
+    uint8_t program[16] = {0}, bank_msb[16] = {0}, bank_lsb[16] = {0};
     uint8_t controllers[16][128] = {{0}}; int16_t bend[16] = {0};
     int32_t active_head[16][128], active_tail[16][128];
-    memset(volume, 127, sizeof(volume)); memset(expression, 127, sizeof(expression)); memset(pan, 64, sizeof(pan));
     memset(active_head, 0xff, sizeof(active_head)); memset(active_tail, 0xff, sizeof(active_tail));
-    for (uint32_t channel = 0; channel < 16; ++channel) controllers[channel][7] = controllers[channel][11] = 127, controllers[channel][10] = 64;
+    automation = calloc(event_count, sizeof(*automation));
+    if (!automation) goto failed;
+    uint32_t automation_count = 0;
     for (uint32_t i = 0; i < event_count; ++i) {
         source_event_t *event = events + i; if (event->tick > final_tick) final_tick = event->tick;
         uint8_t channel = event->channel;
-        if (event->kind == CSEQ_PROGRAM) program[channel] = event->a;
+        if (event->kind == CSEQ_PROGRAM) {
+            program[channel] = event->a;
+            automation[automation_count++] = (afx_n64_automation_t){
+                .tick = control_tick(event->tick, events, event_count, division, tick_rate),
+                .source_tick = event->tick, .source_track = event->track, .source_order = event->order,
+                .kind = AFX_N64_EVENT_PROGRAM, .channel = channel, .value = event->a};
+        }
         else if (event->kind == CSEQ_CONTROL) {
             controllers[channel][event->a] = event->b;
             if (event->a == 0) bank_msb[channel] = event->b;
             else if (event->a == 32) bank_lsb[channel] = event->b;
-            else if (event->a == 7) volume[channel] = event->b;
-            else if (event->a == 10) pan[channel] = event->b;
-            else if (event->a == 11) expression[channel] = event->b;
-        } else if (event->kind == CSEQ_PITCH) bend[channel] = (int16_t)(((uint16_t)event->b << 7 | event->a) - 8192);
+            automation[automation_count++] = (afx_n64_automation_t){
+                .tick = control_tick(event->tick, events, event_count, division, tick_rate),
+                .source_tick = event->tick, .source_track = event->track, .source_order = event->order,
+                .kind = AFX_N64_EVENT_CONTROL, .channel = channel, .control = event->a, .value = event->b};
+        } else if (event->kind == CSEQ_PITCH) {
+            bend[channel] = (int16_t)(((uint16_t)event->b << 7 | event->a) - 8192);
+            automation[automation_count++] = (afx_n64_automation_t){
+                .tick = control_tick(event->tick, events, event_count, division, tick_rate),
+                .source_tick = event->tick, .source_track = event->track, .source_order = event->order,
+                .kind = AFX_N64_EVENT_PITCH, .channel = channel, .pitch_bend = bend[channel]};
+        }
         else if (event->kind == CSEQ_NOTE) {
             if (grow((void **)&nodes, &note_capacity, note_count, sizeof(*nodes))) goto failed;
             note_node_t *node = nodes + note_count;
@@ -231,8 +249,7 @@ int afx_c_n64_cseq_notes(const uint8_t *sequence, uint32_t bytes, int sequence_i
                 .key = event->a, .velocity = event->b,
                 .bank_msb = bank_msb[channel], .bank_lsb = bank_lsb[channel], .program = program[channel],
                 .source_id = note_count, .source_track = event->track, .source_order = event->order, .source_tick = event->tick};
-            note->controller_state = 1ull << 39 | (uint64_t)channel | (uint64_t)volume[channel] << 4 |
-                (uint64_t)expression[channel] << 11 | (uint64_t)pan[channel] << 18 | (uint64_t)(bend[channel] + 8192) << 25;
+            note->controller_state = 1ull << 39 | (uint64_t)channel | (uint64_t)(bend[channel] + 8192) << 25;
             memcpy(note->controllers, controllers[channel], sizeof(note->controllers)); note->pitch_sensitivity = 2;
             if (active_tail[channel][event->a] >= 0) nodes[active_tail[channel][event->a]].next = (int32_t)note_count;
             else active_head[channel][event->a] = (int32_t)note_count;
@@ -256,7 +273,8 @@ int afx_c_n64_cseq_notes(const uint8_t *sequence, uint32_t bytes, int sequence_i
         notes[i] = nodes[i].note;
     }
     *out_notes = notes; *out_count = note_count;
+    *out_automation = automation; *out_automation_count = automation_count;
     free(events); free(nodes); return 0;
 failed:
-    free(events); free(nodes); return -1;
+    free(events); free(nodes); free(automation); return -1;
 }

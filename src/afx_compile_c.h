@@ -90,6 +90,12 @@ int afx_c_optimize_events(const afx_c_event_t *events, uint32_t count,
  * together by whole ticks, so no timing is silently shortened. */
 int afx_c_schedule_notes(afx_c_note_t *notes, uint32_t count, uint8_t cluster_limit);
 
+/* Allocate AICA voices for a chronologically sorted score.  Importers with
+ * source-side automation use the returned channel map to lower live controls
+ * into PATCH commands while retaining the common allocator. */
+int afx_c_assign_channels(const afx_c_note_t *notes, uint32_t count,
+                          uint8_t *out_channels, uint32_t *out_channel_count);
+
 /* Every note must select exactly one key range. The zones become the AFB's
  * contiguous, 32-byte aligned samples and the AFX setup dictionary. */
 int afx_c_compile_zones(const afx_c_note_t *notes, uint32_t count,

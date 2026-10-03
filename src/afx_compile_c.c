@@ -95,6 +95,23 @@ int afx_c_schedule_notes(afx_c_note_t *notes, uint32_t count, uint8_t cluster_li
     return 0;
 }
 
+int afx_c_assign_channels(const afx_c_note_t *notes, uint32_t count,
+                          uint8_t *out_channels, uint32_t *out_channel_count) {
+    uint32_t ends[64] = {0}, channels = 0;
+    if (!notes || !count || !out_channels || !out_channel_count) return -1;
+    for (uint32_t i = 0; i < count; ++i) {
+        uint32_t keyoff = notes[i].release_tick ? notes[i].release_tick : notes[i].end_tick;
+        if (!notes[i].velocity || keyoff <= notes[i].start_tick || notes[i].end_tick < keyoff) return -1;
+        uint32_t channel = 0;
+        while (channel < channels && ends[channel] > notes[i].start_tick) ++channel;
+        if (channel == channels) { if (channels == 64) return -1; ++channels; }
+        ends[channel] = notes[i].end_tick;
+        out_channels[i] = (uint8_t)channel;
+    }
+    *out_channel_count = channels;
+    return 0;
+}
+
 static uint16_t pitch(uint8_t key, uint8_t root_key, int tuning_cents, uint32_t sample_rate) {
     /* AICA reads samples at its 44.1 kHz base rate. A downsampled source must
      * therefore lower FNS by log2(source_rate / 44100), in addition to the
@@ -574,13 +591,15 @@ int afx_c_compile_zones(const afx_c_note_t *input, uint32_t count,
     event_t *events = malloc(2u * count * sizeof(*events));
     afx_c_event_t *raw = NULL, *optimized = NULL;
     afx_c_zone_t *templates = NULL;
-    uint32_t template_count = 0;
+    uint8_t *channels = NULL;
+    uint32_t template_count = 0, channel_count = 0;
     if (!notes || !events || count > UINT32_MAX / 2u) goto failed;
     raw = calloc(2u * count, sizeof(*raw));
     if (!raw) goto failed;
     memcpy(notes, input, count * sizeof(*notes)); qsort(notes, count, sizeof(*notes), compare_note);
     if (afx_c_schedule_notes(notes, count, AFX_EXECUTION_BUDGET_COMMANDS)) goto failed;
-    uint32_t ends[64] = {0}, channels = 0;
+    channels = malloc(count);
+    if (!channels || afx_c_assign_channels(notes, count, channels, &channel_count)) goto failed;
     for (uint32_t i = 0; i < count; ++i) {
         uint32_t keyoff = notes[i].release_tick ? notes[i].release_tick : notes[i].end_tick;
         if (!notes[i].velocity || keyoff <= notes[i].start_tick || notes[i].end_tick < keyoff) goto failed;
@@ -599,14 +618,10 @@ int afx_c_compile_zones(const afx_c_note_t *input, uint32_t count,
                 setup = scan;
             }
         if (setup == zone_count) goto failed;
-        uint32_t channel = 0;
-        while (channel < channels && ends[channel] > notes[i].start_tick) ++channel;
-        if (channel == channels) { if (channels == 64) goto failed; ++channels; }
-        ends[channel] = notes[i].end_tick;
-        events[2 * i] = (event_t){notes[i].start_tick, 1, (uint8_t)channel, notes[i].key, notes[i].velocity,
+        events[2 * i] = (event_t){notes[i].start_tick, 1, channels[i], notes[i].key, notes[i].velocity,
                                   (uint16_t)setup, notes[i].mix, notes[i].controller_state >> 39 ?
                                   (int16_t)(((notes[i].controller_state >> 25) & 16383u) - 8192) : 0};
-        events[2 * i + 1] = (event_t){keyoff, 0, (uint8_t)channel, 0, 0, 0, 0, 0};
+        events[2 * i + 1] = (event_t){keyoff, 0, channels[i], 0, 0, 0, 0, 0};
     }
     qsort(events, 2u * count, sizeof(*events), compare_event);
     uint32_t final_end = 0;
@@ -629,9 +644,9 @@ int afx_c_compile_zones(const afx_c_note_t *input, uint32_t count,
     }
     if (afx_c_optimize_events(raw, 2u * count, zones, zone_count, &optimized, &templates, &template_count) ||
         afx_c_compile_events(optimized, 2u * count, final_end, tick_rate, templates, template_count, out)) goto failed;
-    free(notes); free(events); free(raw); free(optimized); free(templates); return 0;
+    free(channels); free(notes); free(events); free(raw); free(optimized); free(templates); return 0;
 failed:
-    free(notes); free(events); free(raw); free(optimized); free(templates);
+    free(channels); free(notes); free(events); free(raw); free(optimized); free(templates);
     afx_c_output_free(out); return -1;
 }
 
