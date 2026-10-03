@@ -7,6 +7,12 @@ make compiler
 build/afx_compile song.mid --zones instrument.zones song.afb song.afx
 ```
 
+See [the tool inventory](../README.md) for every executable and build
+requirement, [Authoring](../../docs/authoring.md) for end-to-end workflows,
+and [Assets and sidecars](../../docs/specs/assets.md) for the authoritative
+schemas. The zone-map mode above is a low-level raw-PCM input; current AFBM
+`source` entries accept SF2, not standalone PCM.
+
 `afx_profile` is the companion offline performance step. It binds an editable
 `.afp` JSON sidecar to one exact base AFX and lowers its global, setup-template
 and per-note timbre/DSP-send choices to an ordinary derived AFX plus matching
@@ -16,6 +22,8 @@ AFC seek index:
 build/afx_profile init song.afx song.afp room 112
 build/afx_profile apply song.afx song.afc song.afp song-performance.afx song-performance.afc
 build/afx_profile inventory song.afx
+build/afx_compile --visual song-performance.afx song-performance.afv
+build/afx_profile describe song.afx song.afp
 ```
 
 `export-lanes reference.afx base.afx profile.afp preset send [tempo_q8_8]`
@@ -29,6 +37,11 @@ voice allocation. It is a host migration aid; the generated profile and normal
 keeps the profile itself compact: a template is not repeated for every note it
 affects. See [the AFP specification](../../docs/specs/assets.md#afp--performance-profile)
 for the inheritance order and supported register fields.
+`init` creates compact defaults and empty collections. `describe` prints
+the preset/send/tempo for build-time player metadata; loading a derived AFX
+does not itself install a DSP scene or apply its chosen tempo. A changed
+profile currently regenerates an initial-only AFC checkpoint; seeking then
+replays on SH4. The `apply` command requires a matching input AFC.
 
 The compiler emits `song.afb`, `song.afx`, `song.afc`, and `song.afv` together.
 The AFB is one 32-byte-aligned payload; the AFX only contains setup registers
@@ -56,16 +69,21 @@ the AL envelope, key/velocity region, root key, detune, pan, CC91 send and
 VADPCM/RAW16 sample meaning offline. Infinite CSeq loops end at their first
 boundary because the emitted AFX remains finite.
 
-The same C program lowers one ALBank sound-chain for games that use N64 SFX:
+The same C program lowers one ALBank sound-chain using DKR's source chain
+semantics. Other N64 games need their own source compatibility established:
 
 ```sh
 build/afx_n64 --sfx audio_control.bin audio_table.bin 563 collect_item.afx
 ```
 
-It writes the matching `collect_item.afb` and `.afx`. A sustained N64 loop is
+It writes the matching `collect_item.afb` and `.afx`. ID 563 is a one-based
+raw ALInstrument root, not a logical `SOUND_*` enum. Sustained source decay is
 marked `PARK`/controlled so the game, rather than an invented duration, owns
 its lifetime. SFX do not need an AFC seek sidecar. `afx_bank --merge` accepts
 such AFX/AFB pairs and rewrites them into one shared SFX bank.
+An [AFSFX map](../../docs/specs/afsfx.md) can drive application grouping, but
+neither native tool currently reads it; that reader is in DKR. OoT AudioSeq
+is separate research tooling, not a supported `afx_n64` mode.
 
 The SFX path preserves the accepted N64/Python sample policy: try the source
 rate and lower 16/11.025/8 kHz candidates, then select the smallest coding
@@ -79,6 +97,14 @@ pitch and mix so SH4 can scale live controls correctly.
 captures. Its source register writes become raw NOTE/PATCH/KEYOFF events; the
 same optimizer handles its setup dictionary and the same emitter writes the
 four assets.
+
+```sh
+build/afx_vgm track.vgz track.afx
+# Optional explicit coding/gain choices; default is PCM8 at -6.4 dB:
+build/afx_vgm track.vgz track.afx --gain-db -6.4 --adpcm
+```
+
+Only Sega MultiPCM is supported, not arbitrary VGM chips or YM2612/PSG.
 
 Zone maps are deliberately small text files:
 
@@ -98,7 +124,7 @@ map. `auto` deliberately skips ADPCM for looped sources, because its predictor
 seam needs a real hardware capture check. The gate is deterministic, and
 affects only the generated AFB, never runtime behavior.
 
-The compiler does not use the raw 65,535-frame AICA limit directly. One-shots
+The compiler does not use the loop-end register's full 65,535 range. One-shots
 reserve a 256-frame silent safety tail and stop at 65,279 frames; looped
 sources stop at 65,500 so inclusive loop-end rounding remains safe.
 
@@ -149,12 +175,14 @@ optionally narrows a map to one source MIDI channel and wins over the generic
 map for that song/program.
 
 `afx_bank --merge` is for source importers that already emitted complete
-single-song AFB+AFX+AFC sets. It deduplicates their sample payloads into one
+single-song AFB+AFX pairs, with an optional sibling AFC. It deduplicates their sample payloads into one
 AFB and rewrites each flow and seek sidecar to bind to that bank. It is how
 DKR's direct CSeq path makes its shared music bank; it adds no runtime format.
 Merging is lossless: it preserves sample bytes and coding, loop bounds and
 playback parameters. Quality/format decisions belong to the source importer
 or bank map, not to the merge operation.
+It neither emits AFI nor rebuilds AFV/playlist metadata; those are separate
+map-based/player authoring steps.
 
 ```sh
 build/afx_bank --merge music.afb controls raw/sequence_*.afx
