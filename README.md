@@ -24,14 +24,15 @@ Native builds need Clang, libm and zlib headers (on Debian/Ubuntu:
 research utilities. The pinned AICAflow submodule supplies the SDK; no KOS,
 enDjinn or sibling checkout is required. The six executables are written to `build/`.
 
-See [command recipes](src/README.md), [authoring workflow](docs/authoring.md)
-and [binary contract](dependencies/AICAflow/format/docs/assets.md).
+See [command recipes](src/README.md), [authoring workflow](docs/authoring.md),
+[authoring formats and AFV](docs/specs/authoring-formats.md), and the
+[runtime binary contract](dependencies/AICAflow/driver/format/docs/assets.md).
 
 ## Compatibility boundary
 
 AICAforge depends on the driver repository at `dependencies/AICAflow/`,
 pinned by Git's submodule commit. It compiles the public format layer directly
-from `dependencies/AICAflow/format/`; there is no separate vendored copy.
+from `dependencies/AICAflow/driver/format/`; there is no separate vendored copy.
 The driver's validator, simulated loader tests and frozen fixtures are used
 by `make compatibility-check`. Authoring still does not include private
 firmware/IPC headers. File versions remain AFB 1, AFX 7, AFC 1 and AFI 1.

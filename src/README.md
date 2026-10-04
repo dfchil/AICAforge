@@ -7,7 +7,8 @@ make
 ```
 
 See [Authoring](../docs/authoring.md) for workflows and
-[Assets and sidecars](../dependencies/AICAflow/format/docs/assets.md) for schemas and limits.
+[Authoring formats and AFV](../docs/specs/authoring-formats.md) for offline schemas,
+and [runtime asset formats](../dependencies/AICAflow/driver/format/docs/assets.md) for the driver contract.
 
 ## MIDI and samples
 

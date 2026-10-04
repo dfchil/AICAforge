@@ -10,9 +10,10 @@ Mappings select source samples and their explicit AICA sample coding
 (`pcm16`, `pcm8`, `adpcm`, or `auto`). A `.afp` performance profile is an offline-only description of
 register-level changes and DSP use: it produces a new AFX but never changes NOTE or KEYOFF
 timing. Use the music source for timing and use `.afp` for timbre,
-articulation and room treatment. The exact file roles and binary layouts are in
-[Assets and sidecars](../dependencies/AICAflow/format/docs/assets.md); this guide is the human workflow for
-creating them.
+articulation and room treatment. See [authoring formats and AFV](specs/authoring-formats.md)
+for the input schemas and visualisation layout, and the
+[runtime asset contract](../dependencies/AICAflow/driver/format/docs/assets.md)
+for AFB/AFX/AFC/AFI. This guide is the human workflow for creating them.
 
 ## What to edit
 
@@ -150,7 +151,7 @@ Map options control sample rate, loop trimming, envelope, filter, gain, pan,
 LFO, DSP send and SF2 modulators. Defaults use SF2 envelope/filter, standard
 gain, source pan and modulators, with source reverb ignored. Supported linear
 modulators are sampled at NOTE-on; use AFP lanes for sustained changes.
-See the [AFBM reference](../dependencies/AICAflow/format/docs/assets.md#afbm-reference) for values and defaults.
+See the [AFBM reference](specs/authoring-formats.md#afbm-reference) for values and defaults.
 
 `midi_channel` is an optional source selector, not an AICA output channel.
 It is useful when a score reuses a MIDI program number for separate parts,
@@ -186,7 +187,7 @@ defaults, setup template, note template, then note parameters. A lane at offset
 zero folds into NOTE; a positive offset creates PATCH on that running voice.
 The same raw AICA word parameters apply at all levels. There is no need to
 list every note merely to enable DSP. See the
-[AFP reference](../dependencies/AICAflow/format/docs/assets.md#afp--performance-profile) for the complete
+[AFP reference](specs/authoring-formats.md#afp--performance-profile) for the complete
 schema, selectors, precedence and validation.
 
 Applying register changes rewrites the AFX and creates a matching AFC with a
@@ -280,4 +281,4 @@ chip emulator: YM2612, PSG and arbitrary chips are not supported by this tool.
   banks or DSP reservations. See [Memory](memory.md) and [Testing](testing.md).
 
 The public validator and shared emitter enforce the output contract described
-in the [format reference](../dependencies/AICAflow/format/docs/assets.md).
+in the [format reference](../dependencies/AICAflow/driver/format/docs/assets.md).

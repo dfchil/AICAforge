@@ -5,7 +5,7 @@ from pathlib import Path
 root = Path(__file__).resolve().parents[1]
 assert not (root / "driver").exists()
 sdk = root / "dependencies/AICAflow"
-public = sdk / "format/include"
+public = sdk / "driver/format/include"
 assert (sdk / "driver/tools/afx_validate.c").is_file()
 assert not (root / "dependencies/aicaflow-format/include/aicaflow/format.h").exists()
 # Initialization must stop at the SDK: no recursive example/tool dependencies.

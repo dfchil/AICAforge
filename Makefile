@@ -3,7 +3,7 @@
 SRC ?= src
 TEST ?= test
 AICAFLOW := dependencies/AICAflow
-FORMAT := $(AICAFLOW)/format
+FORMAT := $(AICAFLOW)/driver/format
 BUILD ?= build
 CC := clang
 CFLAGS ?= -std=c11 -O2 -Wall -Wextra -Werror
