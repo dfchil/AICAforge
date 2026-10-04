@@ -133,7 +133,9 @@ The result is one `music.afb`, plus `title_theme.afx/.afc/.afv` and
 `field_theme.afx/.afc/.afv`. AFX remains sample-free; every flow is bound to
 the generated bank identity at load time.
 The builder also writes `music.afi` and `music.names.afi` for optional SH4
-one-shot sample access. `--per-song library.afbm output` instead writes one
+one-shot sample access. The first has compact records; the second adds source
+sample names. Repeated setups using the same sample produce one catalog record.
+`--per-song library.afbm output` instead writes one
 bank plus sidecars per song, useful when only one piece is resident and each
 needs its own quality budget.
 
@@ -263,6 +265,35 @@ same event pipeline and emits AFB/AFX/AFC/AFV. PCM8 is the default; `--adpcm`
 explicitly selects encoding. Default gain is -6.4 dB. It is not a general VGM
 chip emulator: YM2612, PSG and arbitrary chips are not supported by this tool.
 
+## Output and resource budgets
+
+The shared emitter generates AFC checkpoints at tick zero and every 1000
+authored ticks before the end of finite music. At 1000 ticks per second this
+is one second; other authored rates and runtime tempo change the wall-clock
+interval. Profile rewrites follow the rules in [Performance profiles](#performance-profiles).
+
+Budget the assets that will be resident together, not the total files on disk:
+
+- Count aligned AFB payloads and AFX upload images. Reserve space for other
+  live sounds, runtime allocations and the application's DSP delay buffer.
+- To reduce sample storage, select fewer SF2 zones, one side of linked stereo,
+  a lower `rate`, or PCM8/`auto`. Shorter `loop_ms` trades sustain detail for space.
+- Use `--per-song` when only one song is resident. Use a shared bank or merge
+  when several flows need the same samples together.
+- Release tails keep channels occupied after KEYOFF. If voice allocation fails,
+  reduce overlapping notes, stereo layers or the authored release-tail reservation.
+- Dense NOTE/PATCH bursts consume command and register-write budgets. Reduce
+  simultaneous events or profile lanes; sample compression does not reduce this work.
+
+AFI, AFC and AFV remain host/player data; AFP is an offline input. Their file
+sizes are not AICA sample-memory costs. A valid individual asset can still fail
+to fit alongside other active assets.
+
+The SDK defines [acceptance limits](../dependencies/AICAflow/driver/format/include/aicaflow/limits.h),
+[memory layout](../dependencies/AICAflow/docs/memory.md) and
+[runtime admission](../dependencies/AICAflow/docs/integration.md).
+See [Testing](testing.md) for output validation and troubleshooting.
+
 ## Known boundaries
 
 - MIDI timing, running status, bank/program, note-off, sustain and all-notes-off
@@ -276,9 +307,6 @@ chip emulator: YM2612, PSG and arbitrary chips are not supported by this tool.
 - N64 CSeq and OoT AudioSeq use different parsers. AudioSeq has only an
   experimental reader. Other N64 SFX chain conventions need source-specific
   lowering; B1 alone does not guarantee DKR-compatible SFX.
-- Memory and per-tick voice/register-work limits are enforced during authoring
-  and runtime. A valid standalone asset can still fail to fit with other live
-  banks or DSP reservations. See [Memory](memory.md) and [Testing](testing.md).
 
 The public validator and shared emitter enforce the output contract described
 in the [format reference](../dependencies/AICAflow/driver/format/docs/assets.md).

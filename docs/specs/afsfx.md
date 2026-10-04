@@ -152,4 +152,4 @@ make -f Makefile.dc aicaflow-fallback-verify
 Pack verification checks membership, masks, scene sizes and basic AFB/AFX
 ranges. Fallback verification checks recorded file lengths and SHA-256 values.
 Test sound selection, live controls, lifetime and scene transitions in the game;
-see [Testing](../testing.md).
+see [hardware testing](../../dependencies/AICAflow/docs/testing.md).

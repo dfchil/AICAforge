@@ -27,6 +27,7 @@ enDjinn or sibling checkout is required. The six executables are written to `bui
 See [command recipes](src/README.md), [authoring workflow](docs/authoring.md),
 [authoring formats and AFV](docs/specs/authoring-formats.md), and the
 [runtime binary contract](dependencies/AICAflow/driver/format/docs/assets.md).
+See [asset testing](docs/testing.md) for validation and troubleshooting.
 
 ## Driver dependency
 
