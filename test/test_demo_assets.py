@@ -17,7 +17,7 @@ with TemporaryDirectory() as directory:
     bank = (output / "inputs.afb").read_bytes()
     assert list(output.glob("*.afb")) == [output / "inputs.afb"]
     seen = {}
-    for name in ("effect", "impulse", "tone", "modulated", "wilhelm"):
+    for name in ("effect", "impulse", "tone", "modulated", "wilhelm", "slow"):
         path = output / (name + ".afx")
         data = path.read_bytes()
         assert data[40:48] == bank[8:16], "all flows bind to the same bank"
@@ -43,9 +43,19 @@ with TemporaryDirectory() as directory:
                 assert state[9] >> 8 == 0, "controls must not be directly audible"
             if name == "wilhelm":
                 assert state[visual.PITCH] == 0x7800, "22.05 kHz, no extra tuning"
+            if name == "slow" and bus == 1:
+                pitch = state[visual.PITCH]
+                octave = pitch >> 11
+                if octave & 8:
+                    octave -= 16
+                frequency = 44100 * 2**octave * (1 + (pitch & 1023) / 1024) / 2048
+                assert .49 < frequency < .51, "chorus needs a half-Hz LFO, not an audio tone"
+            if name == "slow" and bus == 0:
+                assert state[visual.TOTAL_LEVEL] >> 8 == 16, "6 dB audio headroom"
         assert duration - last_off >= 1000, "leave time for DSP tails"
         seen[name] = (buses, pitches)
     assert sorted(seen["effect"][0]) == [0, 0, 0, 0, 1, 2, 3, 4]
     assert sorted(seen["modulated"][0]) == [0, 0, 0, 0, 1]
     assert seen["impulse"][1] != seen["tone"][1]
+    assert sorted(seen["slow"][0]) == [0, 1]
 print("DSP shared bank, input voices, routing, tails and Wilhelm pitch: PASS")

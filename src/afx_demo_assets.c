@@ -73,14 +73,17 @@ failed:
 }
 
 static int dsp_inputs(const char *directory, const char *pcm_path) {
-    enum { AUDIO, CONTROL1, CONTROL2, CONTROL3, CONTROL4, WILHELM, ZONES };
+    enum { AUDIO, CONTROL1, CONTROL2, CONTROL3, CONTROL4, WILHELM, SLOW_LFO, ZONES };
     uint8_t *pcm; uint32_t bytes;
     if (read_file(pcm_path, &pcm, &bytes)) return -1;
     int16_t sine[104];
+    int16_t slow_lfo[2048];
     afx_c_zone_t zones[ZONES] = {0};
     /* Original DSP listener waveform, including its four loop guard frames. */
     for (unsigned i = 0; i < 104; ++i)
         sine[i] = (int16_t)(6000 * sin(6.28318530717958647692 * (i % 100) / 100));
+    for (unsigned i = 0; i < 2048; ++i)
+        slow_lfo[i] = (int16_t)(30000 * sin(6.28318530717958647692 * i / 2048));
     for (unsigned i = 0; i < ZONES; ++i) {
         unsigned frames = i == WILHELM ? bytes / 2 : 104;
         zones[i] = (afx_c_zone_t){
@@ -96,9 +99,17 @@ static int dsp_inputs(const char *directory, const char *pcm_path) {
             zones[i].setup[AFX_FIELD_DIRECT] = 0x0010; /* No direct control audio. */
         }
     }
+    /* Half-Hz control for moving delays/gains; keep the old audio-rate
+     * carrier for ring modulation. This voice has no direct output. */
+    zones[SLOW_LFO] = (afx_c_zone_t){
+        .sample = {(const uint8_t *)slow_lfo, sizeof(slow_lfo), 2048, AFX_PCM16,
+                   69, 1, 0, 2047, 0, 1024},
+        .key_max = 127, .velocity_max = 127, .dsp_send = 0xf1,
+        .setup_mask = 1u << AFX_FIELD_DIRECT, .setup = {[AFX_FIELD_DIRECT] = 0},
+    };
     const struct { const char *name; unsigned key, count, controls; } inputs[] = {
         {"effect", 72, 4, 4}, {"impulse", 96, 1, 0}, {"tone", 69, 1, 0},
-        {"modulated", 72, 4, 1}, {"wilhelm", 69, 1, 0},
+        {"modulated", 72, 4, 1}, {"wilhelm", 69, 1, 0}, {"slow", 69, 1, 1},
     };
     int result = 0;
     for (unsigned i = 0; !result && i < sizeof(inputs) / sizeof(*inputs); ++i) {
@@ -107,14 +118,17 @@ static int dsp_inputs(const char *directory, const char *pcm_path) {
         const unsigned phrase[] = {72, 76, 79, 84}, controls[] = {24, 31, 36, 43};
         for (unsigned n = 0; n < count; ++n)
             notes[n] = (afx_c_note_t){.start_tick = i == 4 ? 1000 : (1000 + n * 1750 + 2) / 4,
-                .end_tick = i == 4 ? 4000 : (1750 + (count - 1) * 1750 + 2) / 4 + 2000,
-                .release_tick = i == 4 ? 3000 : (1750 + n * 1750 + 2) / 4,
+                .end_tick = i >= 4 ? 4000 : (1750 + (count - 1) * 1750 + 2) / 4 + 2000,
+                .release_tick = i >= 4 ? 3000 : (1750 + n * 1750 + 2) / 4,
                 .key = count == 4 ? phrase[n] : inputs[i].key,
-                .velocity = 127, .setup_index = i == 4 ? WILHELM + 1 : AUDIO + 1};
+                /* Leave 6 dB for the wet+dry sum without reducing LFO depth. */
+                .mix = i == 5 ? 0x1024 : 0,
+                .velocity = 127, .setup_index = i >= 4 ? WILHELM + 1 : AUDIO + 1};
         for (unsigned c = 0; c < inputs[i].controls; ++c)
             notes[count++] = (afx_c_note_t){.start_tick = 250, .end_tick = notes[0].end_tick,
-                .release_tick = 1750, .key = inputs[i].controls == 1 ? 36 : controls[c],
-                .velocity = 127, .setup_index = CONTROL1 + c + 1};
+                .release_tick = i == 5 ? 3000 : 1750,
+                .key = i == 5 ? 69 : inputs[i].controls == 1 ? 36 : controls[c],
+                .velocity = 127, .setup_index = i == 5 ? SLOW_LFO + 1 : CONTROL1 + c + 1};
         afx_c_output_t out;
         /* Every flow sees the same complete zone list, so bank identity and
          * sample offsets are identical. Only its setup dictionary is pruned. */
