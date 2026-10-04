@@ -6,6 +6,8 @@
 - Shared-bank building and merging, performance profiles and visualisation output.
 - Pinned AICAflow SDK for format definitions, validation and compatibility tests.
 - Task-based documentation for authoring, formats, resource budgets and tests.
+- DSP listener inputs in one shared bank, including correctly pitched Wilhelm
+  and a slow modulation source with audio headroom.
 
 ### Migration from AICAflow authoring
 
@@ -17,4 +19,4 @@ The SDK dependency is non-recursive. `make update-dependencies` explicitly
 updates it; ordinary builds retain the recorded revision. Runtime output
 versions are AFB 1, AFX 7, AFC 1 and AFI 1.
 
-No release tag or binary distribution has been published for this candidate.
+This candidate is distributed as source; build the native tools locally.

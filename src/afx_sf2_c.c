@@ -617,9 +617,9 @@ static afx_c_zone_t lower_zone(const afx_c_sample_t *sample, const controls_t *c
        filter Q has no equivalent at this register; leave the direct path at
        full level and retain SF2 pan in DIPAN. */
     uint16_t direct = options->has_direct ? options->direct : 0x0f10;
-    /* `direct=` selects the direct-path/Q baseline; it does not freeze the
+    /* `direct=` selects the direct output level; it does not freeze the
      * low pan bits when source_pan is applied.  This is the same split used
-     * by the former Python author: keep Q, then lower SF2 + MIDI CC10 pan. */
+     * by the former Python author: keep level, then lower SF2 + MIDI CC10 pan. */
     if (options->source_pan)
         direct = (uint16_t)((direct & 0xff00u) | dipan | (pan <= 0 ? 0x10 : 0));
     zone.setup[AFX_FIELD_DIRECT] = direct;
