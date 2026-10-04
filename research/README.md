@@ -1,5 +1,7 @@
 # Research tools
 
+[Documentation](../docs/README.md)
+
 Experimental utilities for SoundFont inspection, codec checks and sequence
 tracing. They are not used by example asset builds. Supported authoring tools
 are in `../src/`.

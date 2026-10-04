@@ -1,5 +1,7 @@
 # Asset tests and validation
 
+[Documentation](README.md)
+
 Run from the AICAforge root:
 
 ```sh

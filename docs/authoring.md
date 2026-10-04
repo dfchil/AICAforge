@@ -1,5 +1,7 @@
 # Authoring
 
+[Documentation](README.md)
+
 The supported offline authoring tools are native C. Choose an importer for the
 actual source: MIDI/SF2 or raw PCM, N64 CSeq/ALBank, or Sega MultiPCM VGM/VGZ.
 All lower into the same AICA register/event representation and emit the same

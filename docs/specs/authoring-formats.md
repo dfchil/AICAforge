@@ -1,5 +1,7 @@
 # Authoring formats and visualisation
 
+[Documentation](../README.md)
+
 AICAforge owns the AFP performance profile, AFBM bank map and optional AFV
 visualisation format described here. They are not part of the AICAflow driver
 contract. See [AFSFX bank maps](afsfx.md) for application-specific SFX grouping.

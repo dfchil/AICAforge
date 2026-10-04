@@ -1,5 +1,7 @@
 # AFSFX — SFX bank maps
 
+[Documentation](../README.md)
+
 AFSFX is an offline text map that groups source sound effects into preloaded
 banks. Build outputs are ordinary AFB sample banks and bank-bound AFX flows.
 The application loads the banks; SH4 and ARM7 do not parse AFSFX.

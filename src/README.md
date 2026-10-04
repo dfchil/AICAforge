@@ -1,5 +1,7 @@
 # Native authoring tools
 
+[Documentation](../docs/README.md)
+
 Build from the repository root:
 
 ```sh
