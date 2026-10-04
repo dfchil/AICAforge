@@ -9,6 +9,7 @@
 - [Resource budgets](authoring.md#output-and-resource-budgets) — memory, voices and command density.
 - [Dependencies](dependencies.md) — driver SDK setup and updates.
 - [Testing](testing.md) — validation and troubleshooting.
+- [Release notes](../CHANGELOG.md) — candidate features and migration.
 
 ## Reference
 
