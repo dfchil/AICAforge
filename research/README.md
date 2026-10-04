@@ -2,16 +2,16 @@
 
 Experimental utilities for SoundFont inspection, codec checks and sequence
 tracing. They are not used by example asset builds. Supported authoring tools
-are in `../author/`.
+are in `../src/`.
 
 `afx_n64.py` is the one N64 reader entry point:
 
 ```sh
 # libaudio CSeq + B1 ALBank: emit a complete bank-bound flow.
-python3 tools/research/afx_n64.py cseq control.bin samples.tbl sequences.bin 7 song.afx
+python3 research/afx_n64.py cseq control.bin samples.tbl sequences.bin 7 song.afx
 
 # OoT AudioSeq: lower its sequence/channel/layer program to a trace.
-python3 tools/research/afx_n64.py audioseq /path/to/oot-dc 7 song.trace.json
+python3 research/afx_n64.py audioseq /path/to/oot-dc 7 song.trace.json
 ```
 
 The formats have independent parsers, but both produce the same AICA register

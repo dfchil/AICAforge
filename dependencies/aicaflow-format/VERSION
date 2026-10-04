@@ -1,0 +1,4 @@
+upstream=https://github.com/dfchil/AICAflow.git
+aicaflow-ref=aicaforge-extraction-v1
+aicaflow-commit=455a9a604a129d5dc1aaf12b3cb729ffac487339
+format-api=1

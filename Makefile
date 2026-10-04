@@ -22,6 +22,7 @@ N64_COMPILER := $(BUILD)/afx_n64
 all: $(C_COMPILER) $(DEMO_ASSETS) $(BANK_COMPILER) $(PROFILE_COMPILER) $(VGM_COMPILER) $(N64_COMPILER)
 
 check: all $(C_COMPILER_TEST) $(N64_CSEQ_TEST) $(N64_SFX_TEST)
+	$(MAKE) -C $(FORMAT) check
 	$(C_COMPILER_TEST)
 	$(N64_CSEQ_TEST)
 	$(N64_SFX_TEST)
@@ -67,3 +68,8 @@ $(N64_COMPILER): $(SRC)/afx_n64.c $(SRC)/afx_n64_cseq.c $(SRC)/afx_n64_cseq.h $(
 $(C_COMPILER) $(C_COMPILER_TEST) $(N64_CSEQ_TEST) $(N64_SFX_TEST) $(DEMO_ASSETS) $(BANK_COMPILER) $(PROFILE_COMPILER) $(VGM_COMPILER) $(N64_COMPILER): $(wildcard $(FORMAT)/include/aicaflow/*.h)
 
 .PHONY: all check
+
+update-aicaflow-format:
+	python3 scripts/update-aicaflow-format.py "$(VERSION)"
+
+.PHONY: update-aicaflow-format

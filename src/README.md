@@ -1,16 +1,13 @@
 # Native authoring tools
 
-This AICAflow copy is deprecated during the repository transition.
-New authoring development belongs in [AICAforge](https://github.com/dfchil/AICAforge).
-
 Build from the repository root:
 
 ```sh
-make compiler
+make
 ```
 
-See [Authoring](../../docs/authoring.md) for workflows and
-[Assets and sidecars](../../docs/specs/assets.md) for schemas and limits.
+See [Authoring](../docs/authoring.md) for workflows and
+[Assets and sidecars](../dependencies/aicaflow-format/docs/assets.md) for schemas and limits.
 
 ## MIDI and samples
 
@@ -79,7 +76,7 @@ components remain under SH4 STOP control.
 
 SFX coding selects the smallest candidate passing 30 dB whole-sample and
 24 dB attack SNR, at the source rate or lower 16/11.025/8 kHz rates. Looped
-samples use PCM8 or PCM16. See [AFSFX](../../docs/specs/afsfx.md) for pack maps.
+samples use PCM8 or PCM16. See [AFSFX](../docs/specs/afsfx.md) for pack maps.
 OoT AudioSeq uses a separate experimental reader.
 
 ## MultiPCM VGM/VGZ

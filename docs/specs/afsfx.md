@@ -4,7 +4,7 @@ AFSFX is an offline text map that groups source sound effects into preloaded
 banks. Build outputs are ordinary AFB sample banks and bank-bound AFX flows.
 The application loads the banks; SH4 and ARM7 do not parse AFSFX.
 
-The reader is DKR's `dreamcast/build_aicaflow_sfx.py`, using AICAflow's
+The reader is DKR's `dreamcast/build_aicaflow_sfx.py`, using AICAforge's
 `afx_n64 --sfx` converter and `afx_bank --merge` packer. The map is
 `dreamcast/aicaflow_tools/dkr.afsfx` in the DKR repository. The grammar below
 is DKR-specific, including `core`, `vehicle` and vehicle masks.
@@ -88,10 +88,10 @@ separate car, plane or hovercraft sample subsets.
 Run from an extracted DKR checkout with Python 3.10+:
 
 ```sh
-make -C third_party/aicaflow compiler
+make -C /path/to/AICAforge
 python3 dreamcast/build_aicaflow_sfx.py . \
-  third_party/aicaflow/build/afx_n64 \
-  third_party/aicaflow/build/afx_bank \
+  /path/to/AICAforge/build/afx_n64 \
+  /path/to/AICAforge/build/afx_bank \
   dreamcast/aicaflow_tools/dkr.afsfx build/dc/aicaflow
 ```
 
@@ -143,8 +143,8 @@ OoT AudioSeq is a separate sequence language.
 
 ```sh
 python3 dreamcast/build_aicaflow_sfx.py . \
-  third_party/aicaflow/build/afx_n64 \
-  third_party/aicaflow/build/afx_bank \
+  /path/to/AICAforge/build/afx_n64 \
+  /path/to/AICAforge/build/afx_bank \
   dreamcast/aicaflow_tools/dkr.afsfx build/dc/aicaflow --verify
 make -f Makefile.dc aicaflow-fallback-verify
 ```
