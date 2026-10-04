@@ -72,16 +72,65 @@ failed:
     if (file) fclose(file); return -1;
 }
 
-static int wilhelm_pair(const char *pcm_path, const char *afb, const char *afx) {
+static int dsp_inputs(const char *directory, const char *pcm_path) {
+    enum { AUDIO, CONTROL1, CONTROL2, CONTROL3, CONTROL4, WILHELM, ZONES };
     uint8_t *pcm; uint32_t bytes;
     if (read_file(pcm_path, &pcm, &bytes)) return -1;
-    const afx_c_note_t note = {.start_tick = 1000, .end_tick = 3000, .key = 69, .velocity = 127};
-    const afx_c_sample_t sample = {pcm, bytes, bytes / 2u, AFX_PCM16, 69, 0,
-                                   0, (uint16_t)(bytes / 2u - 1u), 1200, 44100};
-    afx_c_output_t out;
-    int result = afx_c_compile_sample(&note, 1, 1000, &sample, &out);
+    int16_t sine[104];
+    afx_c_zone_t zones[ZONES] = {0};
+    /* Original DSP listener waveform, including its four loop guard frames. */
+    for (unsigned i = 0; i < 104; ++i)
+        sine[i] = (int16_t)(6000 * sin(6.28318530717958647692 * (i % 100) / 100));
+    for (unsigned i = 0; i < ZONES; ++i) {
+        unsigned frames = i == WILHELM ? bytes / 2 : 104;
+        zones[i] = (afx_c_zone_t){
+            .sample = {i == WILHELM ? pcm : (const uint8_t *)sine, frames * 2, frames,
+                       AFX_PCM16, 69, i != WILHELM, 0,
+                       i == WILHELM ? (uint16_t)(frames - 1) : 100, 0,
+                       i == WILHELM ? 22050 : 44100},
+            .key_max = 127, .velocity_max = 127, .dsp_send = 0xf0,
+        };
+        if (i >= CONTROL1 && i <= CONTROL4) {
+            zones[i].dsp_send |= i;
+            zones[i].setup_mask = 1u << AFX_FIELD_DIRECT;
+            zones[i].setup[AFX_FIELD_DIRECT] = 0x0010; /* No direct control audio. */
+        }
+    }
+    const struct { const char *name; unsigned key, count, controls; } inputs[] = {
+        {"effect", 72, 4, 4}, {"impulse", 96, 1, 0}, {"tone", 69, 1, 0},
+        {"modulated", 72, 4, 1}, {"wilhelm", 69, 1, 0},
+    };
+    int result = 0;
+    for (unsigned i = 0; !result && i < sizeof(inputs) / sizeof(*inputs); ++i) {
+        afx_c_note_t notes[8] = {0};
+        unsigned count = inputs[i].count;
+        const unsigned phrase[] = {72, 76, 79, 84}, controls[] = {24, 31, 36, 43};
+        for (unsigned n = 0; n < count; ++n)
+            notes[n] = (afx_c_note_t){.start_tick = i == 4 ? 1000 : (1000 + n * 1750 + 2) / 4,
+                .end_tick = i == 4 ? 4000 : (1750 + (count - 1) * 1750 + 2) / 4 + 2000,
+                .release_tick = i == 4 ? 3000 : (1750 + n * 1750 + 2) / 4,
+                .key = count == 4 ? phrase[n] : inputs[i].key,
+                .velocity = 127, .setup_index = i == 4 ? WILHELM + 1 : AUDIO + 1};
+        for (unsigned c = 0; c < inputs[i].controls; ++c)
+            notes[count++] = (afx_c_note_t){.start_tick = 250, .end_tick = notes[0].end_tick,
+                .release_tick = 1750, .key = inputs[i].controls == 1 ? 36 : controls[c],
+                .velocity = 127, .setup_index = CONTROL1 + c + 1};
+        afx_c_output_t out;
+        /* Every flow sees the same complete zone list, so bank identity and
+         * sample offsets are identical. Only its setup dictionary is pruned. */
+        result = afx_c_compile_zones(notes, count, 1000, zones, ZONES, &out);
+        if (result) break;
+        char path[4096];
+        if (!i) {
+            result = snprintf(path, sizeof(path), "%s/inputs.afb", directory) >= (int)sizeof(path);
+            if (!result) result = write_file(path, out.afb, out.afb_bytes);
+        }
+        if (!result) result = snprintf(path, sizeof(path), "%s/%s.afx", directory, inputs[i].name) >= (int)sizeof(path);
+        if (!result) result = write_file(path, out.afx, out.afx_bytes);
+        afx_c_output_free(&out);
+    }
     free(pcm);
-    return result || write_output(afb, afx, &out);
+    return result;
 }
 
 int main(int argc, char **argv) {
@@ -95,24 +144,7 @@ int main(int argc, char **argv) {
         return multiple_dsp_effects(argv[2], argv[3]) ? 1 : 0;
     }
     if (argc == 4 && !strcmp(argv[1], "dsp-effects")) {
-        const afx_c_note_t phrase[] = {{.start_tick = 0, .end_tick = 375, .key = 72, .velocity = 110},
-                                       {.start_tick = 375, .end_tick = 750, .key = 76, .velocity = 110},
-                                       {.start_tick = 750, .end_tick = 1125, .key = 79, .velocity = 110},
-                                       {.start_tick = 1125, .end_tick = 1500, .key = 84, .velocity = 110}};
-        const afx_c_note_t impulse[] = {{.start_tick = 0, .end_tick = 375, .key = 96, .velocity = 110}};
-        const afx_c_note_t tone[] = {{.start_tick = 0, .end_tick = 750, .key = 69, .velocity = 110}};
-        char afb[4096], afx[4096];
-#define PAIR(name, notes) do { \
-        if (snprintf(afb, sizeof(afb), "%s/" name ".afb", argv[2]) >= (int)sizeof(afb) || \
-            snprintf(afx, sizeof(afx), "%s/" name ".afx", argv[2]) >= (int)sizeof(afx) || \
-            sine_pair(notes, (uint32_t)(sizeof(notes) / sizeof(*(notes))), afb, afx)) return 1; \
-    } while (0)
-        PAIR("effect", phrase); PAIR("impulse", impulse); PAIR("tone", tone); PAIR("modulated", phrase);
-#undef PAIR
-        if (snprintf(afb, sizeof(afb), "%s/wilhelm.afb", argv[2]) >= (int)sizeof(afb) ||
-            snprintf(afx, sizeof(afx), "%s/wilhelm.afx", argv[2]) >= (int)sizeof(afx) ||
-            wilhelm_pair(argv[3], afb, afx)) return 1;
-        return 0;
+        return dsp_inputs(argv[2], argv[3]) ? 1 : 0;
     }
     return fprintf(stderr, "usage: %s quickstart|multiple-dsp-effects out.afb out.afx\n"
                    "       %s dsp-effects output-dir wilhelm.pcm\n", argv[0], argv[0]), 2;
