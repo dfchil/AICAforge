@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-rc1 (unreleased)
+## 0.1.0-rc1 — 2026-10-05
 
 - Standalone native MIDI/SF2/PCM, N64 CSeq/ALBank and MultiPCM VGM/VGZ tools.
 - Shared-bank building and merging, performance profiles and visualisation output.
