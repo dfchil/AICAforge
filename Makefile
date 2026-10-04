@@ -73,8 +73,11 @@ $(C_COMPILER) $(C_COMPILER_TEST) $(N64_CSEQ_TEST) $(N64_SFX_TEST) $(DEMO_ASSETS)
 dependencies:
 	git -c submodule.recurse=false submodule update --init --checkout -- dependencies/AICAflow
 
+update-dependencies:
+	git -c submodule.recurse=false submodule update --init --remote --checkout -- dependencies/AICAflow
+
 compatibility-check: all
 	$(MAKE) -C $(AICAFLOW) runtime-check
 	$(MAKE) -C $(AICAFLOW) compatibility-check AICAFORGE_BIN="$(abspath $(BUILD))" AICAFORGE_DIR="$(CURDIR)"
 
-.PHONY: dependencies compatibility-check
+.PHONY: dependencies update-dependencies compatibility-check

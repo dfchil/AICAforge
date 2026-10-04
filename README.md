@@ -44,12 +44,16 @@ build of both repositories.
 Maintainers update a pin using ordinary Git (start with a clean submodule):
 
 ```sh
-git -C dependencies/AICAflow fetch origin
-git -C dependencies/AICAflow checkout --detach <verified-commit-or-tag>
+make update-dependencies
 make check compatibility-check
 git add dependencies/AICAflow
 git commit -m "Update AICAflow SDK"
 ```
+
+The update target explicitly follows AICAflow's `main`; normal `make` never
+fetches or updates dependencies. `make dependencies` restores the recorded
+revision. Review and commit a successful update's gitlink change. For a
+specific release, use `git -C dependencies/AICAflow checkout --detach <tag>`.
 
 The old format updater and `VERSION` file are replaced by the submodule pin.
 CI checks both the pinned SDK and current AICAflow.

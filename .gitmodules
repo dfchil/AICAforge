@@ -1,3 +1,4 @@
 [submodule "dependencies/AICAflow"]
 	path = dependencies/AICAflow
 	url = https://github.com/dfchil/AICAflow.git
+	branch = main
