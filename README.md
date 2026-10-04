@@ -57,6 +57,8 @@ including paths preceding the old `tools/author/` layout. See
 [the reproducible migration procedure](https://github.com/dfchil/AICAflow/blob/main/docs/repository-split.md).
 
 The `repo-split-v1` tag in each repository marks the initial compatible pair.
-AICAflow temporarily retains a deprecated authoring copy so existing builds
-can migrate; new authoring development belongs here. Removal is a later,
-announced transition release, not part of this extraction.
+That initial release retained an AICAflow authoring copy. The follow-up cleanup
+removes it at the owner's request: authoring code, tests and documentation now
+live only here. AICAflow examples consume the executables from this checkout.
+
+Code is MIT unless otherwise noted; see [third-party code attribution](ASSET_LICENSES.md).
