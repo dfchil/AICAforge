@@ -1,8 +1,9 @@
-# AICAforge native build. The monorepo supplies SRC=author FORMAT=../format.
-# No runtime headers, sources, KOS, enDjinn or sibling checkout is required.
+# Native authoring uses the public contract from the pinned AICAflow SDK.
+# Initialize it with "make dependencies"; no KOS or enDjinn is needed.
 SRC ?= src
 TEST ?= test
-FORMAT ?= dependencies/aicaflow-format
+AICAFLOW := dependencies/AICAflow
+FORMAT := $(AICAFLOW)/format
 BUILD ?= build
 CC := clang
 CFLAGS ?= -std=c11 -O2 -Wall -Wextra -Werror
@@ -69,7 +70,11 @@ $(C_COMPILER) $(C_COMPILER_TEST) $(N64_CSEQ_TEST) $(N64_SFX_TEST) $(DEMO_ASSETS)
 
 .PHONY: all check
 
-update-aicaflow-format:
-	python3 scripts/update-aicaflow-format.py "$(VERSION)"
+dependencies:
+	git -c submodule.recurse=false submodule update --init --checkout -- dependencies/AICAflow
 
-.PHONY: update-aicaflow-format
+compatibility-check: all
+	$(MAKE) -C $(AICAFLOW) runtime-check
+	$(MAKE) -C $(AICAFLOW) compatibility-check AICAFORGE_BIN="$(abspath $(BUILD))" AICAFORGE_DIR="$(CURDIR)"
+
+.PHONY: dependencies compatibility-check

@@ -13,6 +13,7 @@ Playback, DSP, firmware, validation and the persistent tuner belong to
 ```sh
 git clone https://github.com/dfchil/AICAforge.git
 cd AICAforge
+make dependencies
 make -j8
 python3 -m pip install mido sf2utils numpy
 make check
@@ -20,30 +21,38 @@ make check
 
 Native builds need Clang, libm and zlib headers (on Debian/Ubuntu:
 `apt install clang zlib1g-dev`). Python packages are needed only for tests and
-research utilities. No KOS, enDjinn, submodules or sibling runtime checkout is
-required. The six executables are written to `build/`.
+research utilities. The pinned AICAflow submodule supplies the SDK; no KOS,
+enDjinn or sibling checkout is required. The six executables are written to `build/`.
 
 See [command recipes](src/README.md), [authoring workflow](docs/authoring.md)
-and [binary contract](dependencies/aicaflow-format/docs/assets.md).
+and [binary contract](dependencies/AICAflow/format/docs/assets.md).
 
 ## Compatibility boundary
 
-`dependencies/aicaflow-format/` is a small, versioned copy of AICAflow's
-canonical public format layer, not runtime internals. Its `VERSION` records
-the exact upstream tag, commit and format API. File versions remain AFB 1,
-AFX 7, AFC 1 and AFI 1. Repository release versions are independent.
+AICAforge depends on the driver repository at `dependencies/AICAflow/`,
+pinned by Git's submodule commit. It compiles the public format layer directly
+from `dependencies/AICAflow/format/`; there is no separate vendored copy.
+The driver's validator, simulated loader tests and frozen fixtures are used
+by `make compatibility-check`. Authoring still does not include private
+firmware/IPC headers. File versions remain AFB 1, AFX 7, AFC 1 and AFI 1.
+
+`make dependencies` initializes **only this SDK**, never its enDjinn or
+AICAforge example dependencies. Use this target, not recursive submodule
+checkout. The build graph is driver → authoring → examples, not a recursive
+build of both repositories.
+
+Maintainers update a pin using ordinary Git (start with a clean submodule):
 
 ```sh
-make update-aicaflow-format VERSION=aicaforge-extraction-v1
-make check
-make -C /path/to/AICAflow compatibility-check AICAFORGE_BIN="$PWD/build"
+git -C dependencies/AICAflow fetch origin
+git -C dependencies/AICAflow checkout --detach <verified-commit-or-tag>
+make check compatibility-check
+git add dependencies/AICAflow
+git commit -m "Update AICAflow SDK"
 ```
 
-Only maintainers update the vendored layer. Review its diff and run both test
-suites before committing. The updater refuses to overwrite local dependency
-changes. CI tests current AICAforge against current AICAflow and its frozen
-pre-split assets, including format invariants, deterministic output, bank
-binding and stale-checkpoint rejection.
+The old format updater and `VERSION` file are replaced by the submodule pin.
+CI checks both the pinned SDK and current AICAflow.
 
 To build AICAflow examples with these tools:
 `make -C /path/to/AICAflow examples AICAFORGE_BIN="$PWD/build"`.

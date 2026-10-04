@@ -7,7 +7,7 @@ make
 ```
 
 See [Authoring](../docs/authoring.md) for workflows and
-[Assets and sidecars](../dependencies/aicaflow-format/docs/assets.md) for schemas and limits.
+[Assets and sidecars](../dependencies/AICAflow/format/docs/assets.md) for schemas and limits.
 
 ## MIDI and samples
 
