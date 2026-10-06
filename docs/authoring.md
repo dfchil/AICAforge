@@ -195,8 +195,10 @@ list every note merely to enable DSP. See the
 schema, selectors, precedence and validation.
 
 Applying register changes rewrites the AFX and creates a matching AFC with a
-tick-zero checkpoint. SH4 reconstructs later seek positions by replaying events.
-With no register changes, AFX/AFC are copied byte-for-byte. AFB and AFI are
+checkpoint every 10 authored seconds by default. AICAflow seeks to the preceding checkpoint
+without replaying intervening events.
+With no register changes, AFX is copied byte-for-byte and AFC is regenerated
+at the selected interval. AFB and AFI are
 unchanged. Regenerate AFV from the derived AFX to update the visualization.
 
 `describe` prints `preset default-send tempo_q8_8` for the build to place in
@@ -269,10 +271,22 @@ chip emulator: YM2612, PSG and arbitrary chips are not supported by this tool.
 
 ## Output and resource budgets
 
-The shared emitter generates AFC checkpoints at tick zero and every 1000
-authored ticks before the end of finite music. At 1000 ticks per second this
-is one second; other authored rates and runtime tempo change the wall-clock
-interval. Profile rewrites follow the rules in [Performance profiles](#performance-profiles).
+The shared emitter generates AFC checkpoints at tick zero and every 10 authored
+seconds before the end of finite music, rounded up to a whole tick. Runtime
+tempo changes the wall-clock interval. Profile rewrites regenerate checkpoints
+from the final stream, including active channel state.
+
+Append `--checkpoint-seconds N` to `afx_compile` or `afx_profile apply` to
+change the interval. `N` must be a positive whole number of seconds. Longer
+intervals reduce AFC size but make checkpoint-only seeking coarser.
+
+Regenerate AFC for any existing AFX, including bank-compiler output, without
+rebuilding samples:
+
+```sh
+build/afx_compile --seek song.afx song.afc --checkpoint-seconds 10
+build/afx_profile apply base.afx base.afc song.afp song.afx song.afc --checkpoint-seconds 5
+```
 
 Budget the assets that will be resident together, not the total files on disk:
 

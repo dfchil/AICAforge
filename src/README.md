@@ -57,7 +57,8 @@ build/afx_profile describe song.afx song.afp
 
 AFP supports shared defaults, setup templates, note overrides and timed PATCH
 lanes. It preserves NOTE/KEYOFF timing and reuses the bank. Changed profiles
-produce an initial-only AFC checkpoint; SH4 replays events when seeking.
+regenerate AFC checkpoints (10-second default, adjustable with
+`--checkpoint-seconds N`); SH4 restores a checkpoint without replay.
 `describe` supplies DSP/send/tempo metadata for the application build.
 The application installs DSP and applies instance tempo.
 

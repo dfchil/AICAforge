@@ -40,6 +40,11 @@ typedef struct {
     uint32_t afb_bytes, afx_bytes, afc_bytes, afv_bytes;
 } afx_c_output_t;
 
+/* Build checkpoint-only seek data from final AFX bytes, at configurable authored
+ * intervals (rounded up to a tick). out->afc must be NULL; other outputs stay unchanged. */
+#define AFX_C_CHECKPOINT_SECONDS 10u
+int afx_c_build_seek(afx_c_output_t *out, uint32_t seconds);
+
 /* One explicit AICA sample. `loop_end` is inclusive, as in AICA's LEA
  * register. `frames` is decoded PCM frame count even for ADPCM; `bytes` is
  * the contiguous AFB payload size. A non-looping source still has valid loop
