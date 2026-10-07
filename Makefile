@@ -54,9 +54,9 @@ $(BANK_COMPILER): $(SRC)/afx_bank_c.c $(SRC)/afx_compile_c.c $(SRC)/afx_compile_
 	mkdir -p "$(BUILD)"
 	$(CC) $(CFLAGS) -I$(FORMAT)/include $(SRC)/afx_bank_c.c $(SRC)/afx_compile_c.c $(SRC)/afx_midi_c.c $(SRC)/afx_sample_c.c $(SRC)/afx_sf2_c.c $(SRC)/afx_ya2beam.c $(FORMAT)/src/codec.c -lm -o $@
 
-$(PROFILE_COMPILER): $(SRC)/afx_profile_c.c $(FORMAT)/src/codec.c $(FORMAT)/include/aicaflow/codec.h $(FORMAT)/include/aicaflow/format.h
+$(PROFILE_COMPILER): $(SRC)/afx_profile_c.c $(SRC)/afx_compile_c.c $(SRC)/afx_compile_c.h $(FORMAT)/src/codec.c $(FORMAT)/include/aicaflow/codec.h $(FORMAT)/include/aicaflow/format.h
 	mkdir -p "$(BUILD)"
-	$(CC) $(CFLAGS) -I$(FORMAT)/include $(SRC)/afx_profile_c.c $(FORMAT)/src/codec.c -o $@
+	$(CC) $(CFLAGS) -I$(FORMAT)/include $(SRC)/afx_profile_c.c $(SRC)/afx_compile_c.c $(FORMAT)/src/codec.c -lm -o $@
 
 $(VGM_COMPILER): $(SRC)/afx_vgm.c $(SRC)/afx_compile_c.c $(SRC)/afx_compile_c.h $(SRC)/afx_sample_c.c $(SRC)/afx_sample_c.h $(SRC)/afx_ya2beam.c $(FORMAT)/src/codec.c $(FORMAT)/include/aicaflow/codec.h $(FORMAT)/include/aicaflow/format.h
 	mkdir -p "$(BUILD)"

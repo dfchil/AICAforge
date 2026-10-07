@@ -1,7 +1,9 @@
 #include <aicaflow/codec.h>
 #include <aicaflow/limits.h>
+#include "afx_compile_c.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <stdbool.h>
 #include <limits.h>
 #include <stdio.h>
@@ -486,11 +488,11 @@ static int rewrite_stream(const uint8_t *image, const afx_file_header_t *header,
 static int valid_seek(const uint8_t *afc, uint32_t bytes, const afx_file_header_t *header) {
     return bytes >= AFX_SEEK_HEADER_BYTES && afx_read32(afc) == AFX_SEEK_MAGIC && afx_read32(afc + 4) == AFX_SEEK_VERSION && afx_read32(afc + 8) == header->control_id && afx_read32(afc + 12) == header->bank_id_low && afx_read32(afc + 16) == header->bank_id_high && afx_read32(afc + 20) == AFX_SEEK_HEADER_BYTES && afx_read32(afc + 28) == bytes;
 }
-static uint8_t *build_seek(const afx_file_header_t *header, uint32_t control_id, uint32_t *bytes) {
-    uint8_t *afc = calloc(1, AFX_SEEK_HEADER_BYTES + 32u); if (!afc) return NULL;
-    afx_write32(afc, AFX_SEEK_MAGIC); afx_write32(afc + 4, AFX_SEEK_VERSION); afx_write32(afc + 8, control_id); afx_write32(afc + 12, header->bank_id_low); afx_write32(afc + 16, header->bank_id_high); afx_write32(afc + 20, AFX_SEEK_HEADER_BYTES); afx_write32(afc + 24, 32); afx_write32(afc + 28, AFX_SEEK_HEADER_BYTES + 32u);
-    afx_write32(afc + AFX_SEEK_HEADER_BYTES, AFX_CHECKPOINT_MAGIC); afx_write32(afc + AFX_SEEK_HEADER_BYTES + 4, AFX_CHECKPOINT_VERSION); afx_write32(afc + AFX_SEEK_HEADER_BYTES + 8, 1); afx_write32(afc + AFX_SEEK_HEADER_BYTES + 20, header->stream_offset);
-    *bytes = AFX_SEEK_HEADER_BYTES + 32u; return afc;
+static uint8_t *build_seek(uint8_t *afx, uint32_t afx_bytes, uint32_t *bytes, uint32_t seconds) {
+    afx_c_output_t output = {.afx = afx, .afx_bytes = afx_bytes};
+    if (afx_c_build_seek(&output, seconds)) return NULL;
+    *bytes = output.afc_bytes;
+    return output.afc;
 }
 static int profile_effect(const profile_t *profile) {
     if (profile->defaults.mask) return 1;
@@ -511,7 +513,7 @@ static void apply_static_defaults(uint8_t *image, const afx_file_header_t *heade
                 afx_write16(image + setup * AFX_SETUP_BYTES + 2u * field, parameters->values[field]);
 }
 
-static int apply(const char *base_path, const char *base_afc_path, const char *profile_path, const char *out_path, const char *out_afc_path) {
+static int apply(const char *base_path, const char *base_afc_path, const char *profile_path, const char *out_path, const char *out_afc_path, uint32_t seconds) {
     uint8_t *afx = NULL, *afc = NULL, *derived = NULL, *derived_afc = NULL; uint32_t afx_bytes, afc_bytes, derived_bytes, derived_afc_bytes, commands, writes; afx_file_header_t header; profile_t profile; params_t static_defaults; bytes_t stream = {0}; int result = -1;
     if (read_file(base_path, &afx, &afx_bytes) || read_file(base_afc_path, &afc, &afc_bytes) || afx_file_validate(afx, afx_bytes, &header) || !valid_seek(afc, afc_bytes, &header) || profile_read(profile_path, afx, afx_bytes, header.setup_count, &profile)) goto done;
     static_defaults = profile.defaults;
@@ -519,7 +521,7 @@ static int apply(const char *base_path, const char *base_afc_path, const char *p
        parameters are fields of the immutable setup template. */
     static_defaults.mask &= ~((1u << AFX_FIELD_PITCH) | (1u << AFX_FIELD_MIX));
     profile.defaults.mask &= ~static_defaults.mask;
-    if (!static_defaults.mask && !profile_effect(&profile)) { result = write_file(out_path, afx, afx_bytes) || write_file(out_afc_path, afc, afc_bytes); goto done; }
+    if (!static_defaults.mask && !profile_effect(&profile)) { derived_afc = build_seek(afx, afx_bytes, &derived_afc_bytes, seconds); result = !derived_afc || write_file(out_path, afx, afx_bytes) || write_file(out_afc_path, derived_afc, derived_afc_bytes); goto done; }
     if (!profile_effect(&profile)) {
         derived = malloc(afx_bytes);
         if (!derived) goto done;
@@ -528,7 +530,7 @@ static int apply(const char *base_path, const char *base_afc_path, const char *p
         header.control_id = afx_control_id(derived + header.image_offset, header.image_size);
         afx_encode_header(derived, &header);
         if (afx_file_validate(derived, afx_bytes, NULL) ||
-            !(derived_afc = build_seek(&header, header.control_id, &derived_afc_bytes)) ||
+            !(derived_afc = build_seek(derived, afx_bytes, &derived_afc_bytes, seconds)) ||
             write_file(out_path, derived, afx_bytes) || write_file(out_afc_path, derived_afc, derived_afc_bytes)) goto done;
         result = 0; goto done;
     }
@@ -538,7 +540,7 @@ static int apply(const char *base_path, const char *base_afc_path, const char *p
     memcpy(derived, afx, header.image_offset + header.stream_offset); memcpy(derived + header.image_offset + header.stream_offset, stream.data, stream.used);
     apply_static_defaults(derived + header.image_offset, &header, &static_defaults);
     header.control_id = afx_control_id(derived + header.image_offset, header.image_size); afx_encode_header(derived, &header);
-    if (afx_file_validate(derived, derived_bytes, NULL) || !(derived_afc = build_seek(&header, header.control_id, &derived_afc_bytes)) || write_file(out_path, derived, derived_bytes) || write_file(out_afc_path, derived_afc, derived_afc_bytes)) goto done;
+    if (afx_file_validate(derived, derived_bytes, NULL) || !(derived_afc = build_seek(derived, derived_bytes, &derived_afc_bytes, seconds)) || write_file(out_path, derived, derived_bytes) || write_file(out_afc_path, derived_afc, derived_afc_bytes)) goto done;
     result = 0;
 done:
     profile_free(&profile); free(stream.data); free(afx); free(afc); free(derived); free(derived_afc); return result;
@@ -706,6 +708,15 @@ done:
     if (file) fclose(file); free(lanes); free(reference_identities); free(identities); free(reference); free(base); return result;
 }
 int main(int argc, char **argv) {
+    uint32_t seconds = AFX_C_CHECKPOINT_SECONDS;
+    if (argc >= 4 && !strcmp(argv[argc - 2], "--checkpoint-seconds")) {
+        char *end; errno = 0;
+        unsigned long value = strtoul(argv[argc - 1], &end, 10);
+        if (strcmp(argv[1], "apply") || argv[argc - 1][0] < '0' || argv[argc - 1][0] > '9' ||
+            errno || *end || !value || value > UINT32_MAX)
+            return fprintf(stderr, "checkpoint seconds must be a positive 32-bit integer (apply only)\n"), 2;
+        seconds = (uint32_t)value; argc -= 2;
+    }
     if (argc == 6 && !strcmp(argv[1], "init")) {
         uint8_t *afx; uint32_t bytes;
         if (!read_file(argv[2], &afx, &bytes) && !afx_file_validate(afx, bytes, NULL) &&
@@ -728,6 +739,6 @@ int main(int argc, char **argv) {
                             argc == 8 ? (unsigned)strtoul(argv[7], NULL, 10) : 256) ?
                fprintf(stderr, "cannot export lanes\n"), 1 : 0;
     if (argc == 7 && !strcmp(argv[1], "apply"))
-        return apply(argv[2], argv[3], argv[4], argv[5], argv[6]) ? fprintf(stderr, "cannot apply profile\n"), 1 : 0;
-    return fprintf(stderr, "usage: %s init base.afx output.afp preset send | inventory base.afx | describe base.afx profile.afp | export-lanes old.afx base.afx output.afp preset send [tempo] | apply base.afx base.afc profile.afp output.afx output.afc\n", argv[0]), 2;
+        return apply(argv[2], argv[3], argv[4], argv[5], argv[6], seconds) ? fprintf(stderr, "cannot apply profile\n"), 1 : 0;
+    return fprintf(stderr, "usage: %s init base.afx output.afp preset send | inventory base.afx | describe base.afx profile.afp | export-lanes old.afx base.afx output.afp preset send [tempo] | apply base.afx base.afc profile.afp output.afx output.afc [--checkpoint-seconds N]\n", argv[0]), 2;
 }

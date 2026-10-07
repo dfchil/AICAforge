@@ -94,8 +94,10 @@ The offline build reads `afx_profile describe` into player/application
 metadata. The preset name and tempo are not embedded as a runtime profile in
 AFX; merely uploading the derived AFX does not install DSP or set that speed.
 
-An AFP register transform emits a tick-zero AFC checkpoint; later seeks require
-SH4 event replay. An empty transform retains the AFC byte-for-byte.
+An AFP transform regenerates AFC checkpoints at 10-second authored intervals
+by default; `afx_profile apply --checkpoint-seconds N` (option after paths)
+selects another positive whole-second interval. Seeking restores the preceding
+checkpoint directly. An empty transform preserves AFX but regenerates AFC.
 
 Supported preset names are `dry`, `room`, `room_warm` and `room_large`.
 If no register words change, applying the profile copies AFX and AFC unchanged.

@@ -334,18 +334,20 @@ static int seek_append(uint8_t **data, uint32_t *used, uint32_t *capacity,
 /* The driver rebuilds from a point immediately after the next WAIT.  Build
  * that same representation from the final AFX stream so note compilers and
  * trace importers cannot drift into different AFC semantics. */
-static int build_seek(afx_c_output_t *out) {
+int afx_c_build_seek(afx_c_output_t *out, uint32_t seconds) {
     afx_file_header_t header;
     uint64_t duration64;
     uint32_t rate_num, rate_den, at, end, tick = 0, target = 0, used = 16, capacity = 0;
     uint8_t *payload = NULL;
     uint8_t present[AFX_MAX_FLOW_CHANNELS] = {0};
     afx_checkpoint_channel_t active[AFX_MAX_FLOW_CHANNELS] = {{0}};
-    if (!out || afx_file_validate(out->afx, out->afx_bytes, &header) ||
+    if (!out || out->afc || !seconds || afx_file_validate(out->afx, out->afx_bytes, &header) ||
         afx_flow_duration(out->afx, out->afx_bytes, &duration64, &rate_num, &rate_den) ||
         !rate_num || !rate_den || duration64 > UINT32_MAX) return -1;
+    uint64_t interval = ((uint64_t)seconds * rate_num + rate_den - 1u) / rate_den;
     if (seek_grow(&payload, &capacity, 0, used)) return -1;
     afx_write32(payload, AFX_CHECKPOINT_MAGIC); afx_write32(payload + 4, AFX_CHECKPOINT_VERSION);
+    afx_write32(payload + 12, 0); /* Reserved header word must be deterministic. */
     at = header.stream_offset; end = at + header.stream_size;
     for (;;) {
         uint32_t position = 0, remaining = 0;
@@ -376,8 +378,8 @@ static int build_seek(afx_c_output_t *out) {
         }
         if (seek_append(&payload, &used, &capacity, target, position, remaining,
                         active, present, header.required_channels)) goto failed;
-        if (target >= duration64 || duration64 - target <= 1000u) break;
-        target += 1000u;
+        if (target >= duration64 || duration64 - target <= interval) break;
+        target += interval;
     }
     afx_write32(payload + 8, 0); /* Count is written after the final entry. */
     uint32_t cursor = 16, count = 0;
@@ -585,7 +587,7 @@ sample_known:;
     afx_write32(afx + 36, zone_count); afx_write32(afx + 40, bank_id); afx_write32(afx + 44, afx_read32(out->afb + 12));
     afx_write32(afx + 48, AFX_HEADER); afx_write32(afx + 52, zone_count); afx_write32(afx + 64, channels);
     afx_write32(afx + 68, tick_rate); afx_write32(afx + 72, 1);
-    if (!controlled && (build_seek(out) || afx_c_visualize(out->afx, out->afx_bytes, &out->afv, &out->afv_bytes))) goto failed;
+    if (!controlled && (afx_c_build_seek(out, AFX_C_CHECKPOINT_SECONDS) || afx_c_visualize(out->afx, out->afx_bytes, &out->afv, &out->afv_bytes))) goto failed;
     free(offsets); return 0;
 failed:
     free(offsets); afx_c_output_free(out); return -1;

@@ -30,6 +30,16 @@ static void assert_stream_budget(const afx_c_output_t *out) {
 }
 
 int main(void) {
+    const afx_c_note_t long_note = {.start_tick = 0, .end_tick = 5000, .key = 69, .velocity = 100};
+    afx_c_output_t timed;
+    assert(!afx_c_compile_sine(&long_note, 1, 2000, &timed));
+    assert(afx_read32(timed.afc + 40) == 1); /* Default: ten seconds. */
+    free(timed.afc); timed.afc = NULL;
+    assert(!afx_c_build_seek(&timed, 1));
+    assert(afx_read32(timed.afc + 40) == 3);
+    for (unsigned i = 0; i < 3; ++i)
+        assert(afx_read32(timed.afc + 48 + i * 56) == i * 2000);
+    afx_c_output_free(&timed);
     const afx_c_note_t notes[] = {{.start_tick = 0, .end_tick = 500, .key = 69, .velocity = 120},
                                   {.start_tick = 250, .end_tick = 750, .key = 76, .velocity = 100}};
     afx_c_output_t out;

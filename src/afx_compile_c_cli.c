@@ -6,6 +6,7 @@
 #include <aicaflow/codec.h>
 
 #include <stdio.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -98,6 +99,23 @@ failed:
 }
 
 int main(int argc, char **argv) {
+    uint32_t seconds = AFX_C_CHECKPOINT_SECONDS;
+    if (argc >= 3 && !strcmp(argv[argc - 2], "--checkpoint-seconds")) {
+        char *end; errno = 0;
+        unsigned long value = strtoul(argv[argc - 1], &end, 10);
+        if (argv[argc - 1][0] < '0' || argv[argc - 1][0] > '9' || errno || *end ||
+            !value || value > UINT32_MAX)
+            return fprintf(stderr, "checkpoint seconds must be a positive 32-bit integer\n"), 2;
+        seconds = (uint32_t)value; argc -= 2;
+    }
+    if (argc == 4 && !strcmp(argv[1], "--seek")) {
+        afx_c_output_t out = {0};
+        out.afx = read_file(argv[2], &out.afx_bytes);
+        int result = !out.afx || afx_c_build_seek(&out, seconds) ||
+                     write_file(argv[3], out.afc, out.afc_bytes);
+        afx_c_output_free(&out);
+        return result ? fprintf(stderr, "cannot generate AFC checkpoints\n"), 1 : 0;
+    }
     if (argc == 4 && !strcmp(argv[1], "--visual")) {
         uint32_t bytes = 0, visual_bytes = 0;
         uint8_t *afx = read_file(argv[2], &bytes), *visual = NULL;
@@ -131,10 +149,12 @@ int main(int argc, char **argv) {
     int zones_mode = argc == 6 && !strcmp(argv[2], "--zones");
     int sf2_mode = argc == 7 && !strcmp(argv[2], "--sf2");
     if ((argc != 4 && argc != 5) && !zones_mode && !sf2_mode)
-        return fprintf(stderr, "usage: %s --visual flow.afx out.afv\n"
+        return fprintf(stderr, "Append --checkpoint-seconds N to set AFC spacing (default 10).\n"
+                       "usage: %s --seek flow.afx out.afc\n"
+                       "       %s --visual flow.afx out.afv\n"
                        "       %s source.mid [sample.pcm] out.afb out.afx\n"
                        "       %s source.mid --zones zones.txt out.afb out.afx\n"
-                       "       %s source.mid --sf2 pcm16|pcm8|adpcm|auto bank.sf2 out.afb out.afx\n", argv[0], argv[0], argv[0], argv[0]), 2;
+                       "       %s source.mid --sf2 pcm16|pcm8|adpcm|auto bank.sf2 out.afb out.afx\n", argv[0], argv[0], argv[0], argv[0], argv[0]), 2;
     uint32_t midi_bytes;
     uint8_t *data = read_file(argv[1], &midi_bytes);
     if (!data) return fprintf(stderr, "cannot read %s\n", argv[1]), 2;
@@ -164,6 +184,13 @@ int main(int argc, char **argv) {
     free_zones(zones, owned, zone_count);
     afx_c_sf2_output_free(&sf2);
     if (result) return fprintf(stderr, "cannot compile source\n"), 1;
+    if (seconds != AFX_C_CHECKPOINT_SECONDS) {
+        free(out.afc); out.afc = NULL; out.afc_bytes = 0;
+        if (afx_c_build_seek(&out, seconds)) {
+            afx_c_output_free(&out);
+            return fprintf(stderr, "cannot generate AFC checkpoints\n"), 1;
+        }
+    }
     if (out.afb_bytes < AFX_BANK_HEADER_BYTES || out.afb_bytes - AFX_BANK_HEADER_BYTES > AFX_TARGET_MAX_BANK_BYTES) {
         afx_c_output_free(&out);
         return fprintf(stderr, "AFB payload exceeds the AICA asset arena\n"), 1;
