@@ -347,6 +347,7 @@ int afx_c_build_seek(afx_c_output_t *out, uint32_t seconds) {
     uint64_t interval = ((uint64_t)seconds * rate_num + rate_den - 1u) / rate_den;
     if (seek_grow(&payload, &capacity, 0, used)) return -1;
     afx_write32(payload, AFX_CHECKPOINT_MAGIC); afx_write32(payload + 4, AFX_CHECKPOINT_VERSION);
+    afx_write32(payload + 12, 0); /* Reserved header word must be deterministic. */
     at = header.stream_offset; end = at + header.stream_size;
     for (;;) {
         uint32_t position = 0, remaining = 0;

@@ -38,6 +38,7 @@ with tempfile.TemporaryDirectory(prefix="afx-checkpoints-") as directory:
         out, afc = root / f"{mode}.afx", root / f"{mode}.afc"
         subprocess.run([BIN / "afx_profile", "apply", base, seek, profile, out, afc], check=True)
         data = afc.read_bytes()
+        assert struct.unpack_from("<I", data, 44)[0] == 0
         assert struct.unpack_from("<I", data, 40)[0] == 1
         if mode == "unchanged":
             assert data == seek.read_bytes() and out.read_bytes() == base.read_bytes()
