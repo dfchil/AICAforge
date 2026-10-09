@@ -44,6 +44,8 @@ typedef struct {
  * intervals (rounded up to a tick). out->afc must be NULL; other outputs stay unchanged. */
 #define AFX_C_CHECKPOINT_SECONDS 10u
 int afx_c_build_seek(afx_c_output_t *out, uint32_t seconds);
+/* Validate the final stream and store its peak command/register-write budget. */
+int afx_c_set_work_profile(uint8_t *afx, uint32_t bytes);
 
 /* One explicit AICA sample. `loop_end` is inclusive, as in AICA's LEA
  * register. `frames` is decoded PCM frame count even for ADPCM; `bytes` is

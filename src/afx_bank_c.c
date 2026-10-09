@@ -788,7 +788,7 @@ static int merge_final_banks(const char *bank_path, const char *controls_dir, in
         afx_write32(rewritten + 40, bank_low); afx_write32(rewritten + 44, bank_high);
         uint32_t control_id = afx_control_id(rewritten + flow->header.image_offset, flow->header.image_size);
         afx_write32(rewritten + 32, control_id);
-        if (afx_file_validate(rewritten, flow->afx_bytes, NULL) ||
+        if (afx_c_set_work_profile(rewritten, flow->afx_bytes) ||
             (flow->afc && rewrite_seek(flow, samples, bank_low, bank_high, control_id, &seek, &seek_bytes)) ||
             write_file(afx_path, rewritten, flow->afx_bytes) ||
             (flow->afc && write_file(afc_path, seek, seek_bytes))) {

@@ -8,6 +8,11 @@ All lower into the same AICA register/event representation and emit the same
 bank-bound playback model. A game integration can separately group its SFX
 with an [AFSFX residency map](specs/afsfx.md).
 
+AFX exports include the peak command/register-write work profile required by
+AICAflow's trusted loader. Profile application and bank merging also regenerate
+this field when processing older AFX inputs. The profile occupies an existing
+header field; file size and format version are unchanged.
+
 Mappings select source samples and their explicit AICA sample coding
 (`pcm16`, `pcm8`, `adpcm`, or `auto`). A `.afp` performance profile is an offline-only description of
 register-level changes and DSP use: it produces a new AFX but never changes NOTE or KEYOFF

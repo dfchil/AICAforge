@@ -509,6 +509,17 @@ int afx_c_visualize(const uint8_t *afx, uint32_t bytes, uint8_t **out_visual, ui
     return 0;
 }
 
+int afx_c_set_work_profile(uint8_t *afx, uint32_t bytes) {
+    afx_file_header_t header;
+    afx_validation_profile_t work;
+    if (afx_file_validate_profile(afx, bytes, &header, &work) || !work.peak_commands ||
+        work.peak_commands > AFX_EXECUTION_BUDGET_COMMANDS ||
+        work.peak_register_writes > AFX_EXECUTION_BUDGET_WRITES) return -1;
+    header.work_profile = AFX_WORK_PROFILE(work.peak_commands, work.peak_register_writes);
+    afx_encode_header(afx, &header);
+    return 0;
+}
+
 static int assemble_output(const afx_c_zone_t *zones, uint32_t zone_count,
                            const afx_c_zone_t *bank_zones, uint32_t bank_zone_count,
                            const uint8_t *stream, uint32_t stream_bytes,
@@ -587,6 +598,7 @@ sample_known:;
     afx_write32(afx + 36, zone_count); afx_write32(afx + 40, bank_id); afx_write32(afx + 44, afx_read32(out->afb + 12));
     afx_write32(afx + 48, AFX_HEADER); afx_write32(afx + 52, zone_count); afx_write32(afx + 64, channels);
     afx_write32(afx + 68, tick_rate); afx_write32(afx + 72, 1);
+    if (afx_c_set_work_profile(afx, out->afx_bytes)) goto failed;
     if (!controlled && (afx_c_build_seek(out, AFX_C_CHECKPOINT_SECONDS) || afx_c_visualize(out->afx, out->afx_bytes, &out->afv, &out->afv_bytes))) goto failed;
     free(offsets); return 0;
 failed:

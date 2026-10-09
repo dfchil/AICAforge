@@ -515,7 +515,8 @@ static void apply_static_defaults(uint8_t *image, const afx_file_header_t *heade
 
 static int apply(const char *base_path, const char *base_afc_path, const char *profile_path, const char *out_path, const char *out_afc_path, uint32_t seconds) {
     uint8_t *afx = NULL, *afc = NULL, *derived = NULL, *derived_afc = NULL; uint32_t afx_bytes, afc_bytes, derived_bytes, derived_afc_bytes, commands, writes; afx_file_header_t header; profile_t profile; params_t static_defaults; bytes_t stream = {0}; int result = -1;
-    if (read_file(base_path, &afx, &afx_bytes) || read_file(base_afc_path, &afc, &afc_bytes) || afx_file_validate(afx, afx_bytes, &header) || !valid_seek(afc, afc_bytes, &header) || profile_read(profile_path, afx, afx_bytes, header.setup_count, &profile)) goto done;
+    if (read_file(base_path, &afx, &afx_bytes) || read_file(base_afc_path, &afc, &afc_bytes) || afx_file_validate(afx, afx_bytes, &header) || !valid_seek(afc, afc_bytes, &header) || profile_read(profile_path, afx, afx_bytes, header.setup_count, &profile) || afx_c_set_work_profile(afx, afx_bytes)) goto done;
+    header.work_profile = afx_read32(afx + 76);
     static_defaults = profile.defaults;
     /* Pitch and MIX are supplied by each NOTE. All other public profile
        parameters are fields of the immutable setup template. */
