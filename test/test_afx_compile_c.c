@@ -11,6 +11,7 @@ static void assert_stream_budget(const afx_c_output_t *out) {
     assert(afx_file_validate(out->afx, out->afx_bytes, &header) == AFX_OK);
     uint32_t at = header.image_offset + header.stream_offset;
     uint32_t end = at + header.stream_size, commands = 0, writes = 0;
+    uint32_t peak_commands = 0, peak_writes = 0;
     while (at < end) {
         afx_event_t event;
         assert(afx_decode_event(out->afx + at, end - at, &event) == AFX_OK);
@@ -23,10 +24,15 @@ static void assert_stream_budget(const afx_c_output_t *out) {
             ++commands; writes += 19;
         } else if (event.opcode == AFX_OP_KEYOFF) {
             ++commands; ++writes;
+        } else if (event.opcode == AFX_OP_PATCH) {
+            ++commands; writes += afx_field_value_bytes(event.mask) / 2u;
         }
+        if (commands > peak_commands) peak_commands = commands;
+        if (writes > peak_writes) peak_writes = writes;
     }
     assert(commands <= AFX_EXECUTION_BUDGET_COMMANDS);
     assert(writes <= AFX_EXECUTION_BUDGET_WRITES);
+    assert(header.work_profile && header.work_profile == AFX_WORK_PROFILE(peak_commands, peak_writes));
 }
 
 int main(void) {
@@ -44,6 +50,10 @@ int main(void) {
                                   {.start_tick = 250, .end_tick = 750, .key = 76, .velocity = 100}};
     afx_c_output_t out;
     assert(!afx_c_compile_sine(notes, 2, 1000, &out));
+    assert_stream_budget(&out);
+    afx_write32(out.afx + 76, 0); /* Older exports can be upgraded offline. */
+    assert(!afx_c_set_work_profile(out.afx, out.afx_bytes));
+    assert_stream_budget(&out);
     assert(afx_file_validate(out.afx, out.afx_bytes, NULL) == AFX_OK);
     assert(afx_read16(out.afx + afx_read32(out.afx + 16) + 18) == 0x0f10);
     assert(out.afc_bytes > 64 && afx_read32(out.afc) == AFX_SEEK_MAGIC);

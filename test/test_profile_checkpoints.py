@@ -12,6 +12,16 @@ with tempfile.TemporaryDirectory(prefix="afx-checkpoints-") as directory:
     root = Path(directory)
     base, bank, seek, profile = (root / name for name in ("base.afx", "base.afb", "base.afc", "test.afp"))
     subprocess.run([BIN / "afx_demo_assets", "quickstart", bank, base], check=True)
+    exported = base.read_bytes()
+    expected_work = struct.unpack_from("<I", exported, 76)[0]
+    assert expected_work
+    legacy = bytearray(exported)
+    struct.pack_into("<I", legacy, 76, 0)
+    base.write_bytes(legacy)  # All apply paths must upgrade older unprofiled input.
+    controls = root / "merged"
+    controls.mkdir()
+    subprocess.run([BIN / "afx_bank", "--merge", root / "merged.afb", controls, base], check=True)
+    assert struct.unpack_from("<I", (controls / base.name).read_bytes(), 76)[0] == expected_work
     subprocess.run([BIN / "afx_profile", "init", base, profile, "dry", "0"], check=True)
     original = json.loads(profile.read_text())
     assert struct.unpack_from("<I", seek.read_bytes(), 40)[0] == 1
@@ -37,11 +47,12 @@ with tempfile.TemporaryDirectory(prefix="afx-checkpoints-") as directory:
         profile.write_text(json.dumps(settings))
         out, afc = root / f"{mode}.afx", root / f"{mode}.afc"
         subprocess.run([BIN / "afx_profile", "apply", base, seek, profile, out, afc], check=True)
+        assert struct.unpack_from("<I", out.read_bytes(), 76)[0]
         data = afc.read_bytes()
         assert struct.unpack_from("<I", data, 44)[0] == 0
         assert struct.unpack_from("<I", data, 40)[0] == 1
         if mode == "unchanged":
-            assert data == seek.read_bytes() and out.read_bytes() == base.read_bytes()
+            assert data == seek.read_bytes() and out.read_bytes() == exported
         subprocess.run([BIN / "afx_profile", "apply", base, seek, profile, out, afc,
                         "--checkpoint-seconds", "1"], check=True)
         data = afc.read_bytes()
