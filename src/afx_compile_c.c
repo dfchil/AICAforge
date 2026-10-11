@@ -703,25 +703,32 @@ static int compile_events(const afx_c_event_t *input, uint32_t count,
     memcpy(events, input, count * sizeof(*events)); qsort(events, count, sizeof(*events), compare_control_event);
     for (uint32_t i = 0; i < count; ++i) {
         afx_c_event_t *source = &events[i];
+        uint32_t cost = 0;
         if (source->tick > duration_ticks || (i && source->tick == events[i - 1].tick &&
                                                source->order == events[i - 1].order) ||
             source->channel >= AFX_MAX_FLOW_CHANNELS || (source->mask & ~AFX_FIELD_MASK)) goto failed;
         if (source->opcode == AFX_OP_NOTE) {
             if (source->setup >= zone_count) goto failed;
-            writes += NOTE_WRITES;
+            cost = NOTE_WRITES;
         } else if (source->opcode == AFX_OP_PATCH) {
             if (!source->mask) goto failed;
-            writes += afx_field_value_bytes(source->mask) / 2u;
+            cost = afx_field_value_bytes(source->mask) / 2u;
         } else if (source->opcode == AFX_OP_KEYOFF) {
             if (source->mask) goto failed;
-            ++writes;
+            cost = 1;
         } else if (source->opcode == AFX_OP_PARK) {
             if (source->mask || !i || i + 1u != count || source->tick != duration_ticks) goto failed;
         } else goto failed;
-        ++commands;
-        if (commands > AFX_EXECUTION_BUDGET_COMMANDS || writes > AFX_EXECUTION_BUDGET_WRITES) goto failed;
-        if (i + 1u == count || events[i + 1].tick != source->tick) commands = writes = 0;
-        cursor += encode_wait(stream + cursor, source->tick - previous); previous = source->tick;
+        /* Work beyond one executor pass continues in the next tick. Events keep
+         * their order, so everything behind a moved event moves with it. */
+        uint32_t tick = source->tick > previous ? source->tick : previous;
+        if (tick != previous) commands = writes = 0;
+        if (commands == AFX_EXECUTION_BUDGET_COMMANDS || cost > AFX_EXECUTION_BUDGET_WRITES - writes) {
+            if (tick == UINT32_MAX) goto failed;
+            ++tick; commands = writes = 0;
+        }
+        ++commands; writes += cost;
+        cursor += encode_wait(stream + cursor, tick - previous); previous = tick;
         afx_event_t wire = {.opcode = source->opcode, .channel = source->channel,
                             .setup = source->setup, .mask = source->mask};
         if (wire.opcode == AFX_OP_NOTE && wire.mask == AFX_NOTE_PL_MASK) wire.opcode = AFX_OP_NOTE_PL;
@@ -734,7 +741,11 @@ static int compile_events(const afx_c_event_t *input, uint32_t count,
         if (source->channel + 1u > channels) channels = source->channel + 1u;
     }
     int controlled = events[count - 1u].opcode == AFX_OP_PARK;
-    if (!controlled) { cursor += encode_wait(stream + cursor, duration_ticks - previous); stream[cursor++] = AFX_OP_END; }
+    if (!controlled) {
+        /* A burst moved past the authored end still plays before END. */
+        if (duration_ticks > previous) cursor += encode_wait(stream + cursor, duration_ticks - previous);
+        stream[cursor++] = AFX_OP_END;
+    }
     if (assemble_output(zones, zone_count, bank_zones, bank_zone_count,
                         stream, cursor, channels, tick_rate, controlled, out)) goto failed;
     free(events); free(stream); return 0;

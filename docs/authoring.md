@@ -303,8 +303,11 @@ Budget the assets that will be resident together, not the total files on disk:
   when several flows need the same samples together.
 - Release tails keep channels occupied after KEYOFF. If voice allocation fails,
   reduce overlapping notes, stereo layers or the authored release-tail reservation.
-- Dense NOTE/PATCH bursts consume command and register-write budgets. Reduce
-  simultaneous events or profile lanes; sample compression does not reduce this work.
+- One tick holds at most 38 commands and 171 register writes (nine full
+  notes). The compilers move a denser burst, in order, into the following
+  ticks, so the last event of a very dense chord starts a few milliseconds
+  late. `afx_profile apply` still rejects a lane that overflows its tick.
+  Sample compression does not reduce this work.
 
 AFI, AFC and AFV remain host/player data; AFP is an offline input. Their file
 sizes are not AICA sample-memory costs. A valid individual asset can still fail
