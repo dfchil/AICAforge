@@ -192,6 +192,35 @@ int main(void) {
     assert(out.afx[trace_image + AFX_SETUP_BYTES] == AFX_OP_NOTE_PL &&
            out.afx[trace_image + AFX_SETUP_BYTES + 10] == AFX_OP_PATCH_LEVEL);
     afx_c_output_free(&out);
+    /* Twenty notes on one tick are 380 register writes. The emitter keeps
+       their order and moves what does not fit into the following ticks. */
+    afx_c_event_t burst[40];
+    for (unsigned i = 0; i < 20; ++i) {
+        burst[i] = (afx_c_event_t){.tick = 0, .order = i, .opcode = AFX_OP_NOTE, .channel = (uint8_t)i,
+            .mask = AFX_NOTE_PL_MASK, .fields = {[AFX_FIELD_PITCH] = 0x0800, [AFX_FIELD_MIX] = 0x3024}};
+        burst[20 + i] = (afx_c_event_t){.tick = 20, .order = i, .opcode = AFX_OP_KEYOFF, .channel = (uint8_t)i};
+    }
+    assert(!afx_c_compile_events(burst, 40, 30, 1000, trace_zone, 1, &out));
+    assert_stream_budget(&out);
+    {
+        afx_file_header_t header;
+        assert(afx_file_validate(out.afx, out.afx_bytes, &header) == AFX_OK);
+        uint32_t at = header.image_offset + header.stream_offset, end = at + header.stream_size;
+        uint32_t tick = 0, notes_at[4] = {0}, last_channel = 0, keyoffs = 0;
+        while (at < end) {
+            afx_event_t event;
+            assert(afx_decode_event(out.afx + at, end - at, &event) == AFX_OK);
+            at += event.bytes;
+            if (event.opcode >= AFX_OP_WAIT8 && event.opcode <= AFX_OP_WAIT32) tick += event.wait;
+            else if (event.opcode == AFX_OP_NOTE) {
+                assert(tick < 4 && event.channel >= last_channel);
+                ++notes_at[tick]; last_channel = event.channel;
+            } else if (event.opcode == AFX_OP_KEYOFF) { assert(tick == 20); ++keyoffs; }
+        }
+        /* Nine notes fit in 171 writes; later events keep their own ticks. */
+        assert(notes_at[0] == 9 && notes_at[1] == 9 && notes_at[2] == 2 && keyoffs == 20 && tick == 30);
+    }
+    afx_c_output_free(&out);
     /* A release tail occupies its channel, but KEYOFF remains at the musical
        note end.  This is how the offline bank builder preserves an SF2
        release without inventing an ARM7-specific command. */
