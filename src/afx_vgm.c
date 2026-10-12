@@ -265,7 +265,8 @@ static int write_register(parser_t *parser, uint8_t chip, uint8_t port, uint8_t 
         if (active) {
             uint16_t mix = source_mix(state->registers[slot], parser->gain_db, level->value);
             if (mix != level->mix) { uint16_t fields[AFX_FIELD_COUNT] = {0}; fields[AFX_FIELD_MIX] = mix;
-                if (add_patch(parser, now, chip, slot, 1u << AFX_FIELD_MIX, fields)) return -1; level->mix = mix; }
+                if (add_patch(parser, now, chip, slot, 1u << AFX_FIELD_MIX, fields)) return -1;
+                level->mix = mix; }
         }
     } else if (active && (reg == 0 || reg == 2 || reg == 3 || reg == 6 || reg == 7)) {
         uint16_t fields[AFX_FIELD_COUNT] = {0}; uint32_t mask;
@@ -480,6 +481,7 @@ int main(int argc, char **argv) {
     status = 0;
 done:
     free(bank); free(seek); free(visual); afx_c_output_free(&result); free(events); free(zones); free(optimized); free(templates);
-    for (uint32_t i = 0; i < adpcm_count; ++i) free(adpcm_data[i]); free(adpcm_data); parser_free(&parser);
+    for (uint32_t i = 0; i < adpcm_count; ++i) free(adpcm_data[i]);
+    free(adpcm_data); parser_free(&parser);
     return status;
 }

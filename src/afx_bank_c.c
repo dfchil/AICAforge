@@ -102,7 +102,8 @@ static int read_file(const char *path, uint8_t **out_data, uint32_t *out_bytes) 
     if (!data || fread(data, 1, (size_t)bytes, file) != (size_t)bytes) { free(data); goto failed; }
     fclose(file); *out_data = data; *out_bytes = (uint32_t)bytes; return 0;
 failed:
-    if (file) fclose(file); return -1;
+    if (file) fclose(file);
+    return -1;
 }
 
 static int write_file(const char *path, const uint8_t *data, uint32_t bytes) {
@@ -205,7 +206,7 @@ static int write_afi(const char *path, const uint8_t *afb, uint32_t afb_bytes,
         afx_write32(data + cursor + 8, entry->frames);
         data[cursor + 12] = entry->format;
         if (names) {
-            char fallback[16] = {0};
+            char fallback[24] = {0}; /* "sample-" and any 32-bit index; the record keeps 16 bytes. */
             const char *name = zone_names && zone_names[zones[sample]][0] ? zone_names[zones[sample]] :
                                (snprintf(fallback, sizeof(fallback), "sample-%03u", sample), fallback);
             memcpy(data + cursor + AFX_INDEX_RECORD_BYTES, name,
