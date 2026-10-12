@@ -114,11 +114,13 @@ static int read_file(const char *path, uint8_t **out, uint32_t *out_bytes) {
     if (!data || fread(data, 1, (size_t)length, file) != (size_t)length) { free(data); goto failed; }
     fclose(file); data[length] = 0; *out = data; *out_bytes = (uint32_t)length; return 0;
 failed:
-    if (file) fclose(file); return -1;
+    if (file) fclose(file);
+    return -1;
 }
 static int write_file(const char *path, const uint8_t *data, uint32_t bytes) {
     FILE *file = fopen(path, "wb"); int failed = !file || fwrite(data, 1, bytes, file) != bytes;
-    if (file && fclose(file)) failed = 1; return failed ? -1 : 0;
+    if (file && fclose(file)) failed = 1;
+    return failed ? -1 : 0;
 }
 static int json_alloc(json_parser_t *parser, json_type_t type, int start) {
     if (parser->count == parser->capacity) return -1;
@@ -480,7 +482,8 @@ static int rewrite_stream(const uint8_t *image, const afx_file_header_t *header,
         else if (event.opcode == AFX_OP_KEYOFF) { ++commands; ++writes; active_note[event.channel] = false; }
         if (commands > AFX_EXECUTION_BUDGET_COMMANDS || writes > AFX_EXECUTION_BUDGET_WRITES || bytes_event(stream, &event, values)) return -1;
     }
-    if (commands > *max_commands) *max_commands = commands; if (writes > *max_writes) *max_writes = writes;
+    if (commands > *max_commands) *max_commands = commands;
+    if (writes > *max_writes) *max_writes = writes;
     for (uint32_t i = 0; i < profile->override_count; ++i) if (!profile->overrides[i].used) return -1;
     for (uint32_t i = 0; i < profile->lane_count; ++i) if (!profile->lanes[i].used || profile->lanes[i].pending) return -1;
     return 0;
@@ -706,7 +709,8 @@ static int export_lanes(const char *reference_path, const char *base_path, const
     if (fputs("\n  ]\n}\n", file) == EOF || fclose(file)) { file = NULL; goto done; }
     file = NULL; result = 0;
 done:
-    if (file) fclose(file); free(lanes); free(reference_identities); free(identities); free(reference); free(base); return result;
+    if (file) fclose(file);
+    free(lanes); free(reference_identities); free(identities); free(reference); free(base); return result;
 }
 int main(int argc, char **argv) {
     uint32_t seconds = AFX_C_CHECKPOINT_SECONDS;

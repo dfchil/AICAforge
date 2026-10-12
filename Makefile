@@ -5,7 +5,10 @@ TEST ?= test
 AICAFLOW := dependencies/AICAflow
 FORMAT := $(AICAFLOW)/driver/format
 BUILD ?= build
+# Clang is the default; CC from the environment or command line selects another compiler.
+ifeq ($(origin CC),default)
 CC := clang
+endif
 CFLAGS ?= -std=c11 -O2 -Wall -Wextra -Werror
 TEST_CFLAGS := -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
 export AFX_BUILD_DIR := $(abspath $(BUILD))

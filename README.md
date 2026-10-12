@@ -19,8 +19,9 @@ python3 -m pip install mido sf2utils numpy
 make check
 ```
 
-Native builds need Clang, libm and zlib headers (on Debian/Ubuntu:
-`apt install clang zlib1g-dev`). Python packages are needed only for tests and
+Native builds need a C11 compiler, libm and zlib headers (on Debian/Ubuntu:
+`apt install clang zlib1g-dev`). Clang is the default; `make CC=gcc` builds
+the tools with GCC. Python packages are needed only for tests and
 research utilities. The pinned AICAflow submodule supplies the SDK; no KOS,
 enDjinn or sibling checkout is required. The six executables are written to `build/`.
 

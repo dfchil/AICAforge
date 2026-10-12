@@ -69,7 +69,8 @@ static int read_file(const char *path, uint8_t **out, uint32_t *out_bytes) {
     if (!data || fread(data, 1, (size_t)bytes, file) != (size_t)bytes) { free(data); goto failed; }
     fclose(file); *out = data; *out_bytes = (uint32_t)bytes; return 0;
 failed:
-    if (file) fclose(file); return -1;
+    if (file) fclose(file);
+    return -1;
 }
 
 static int dsp_inputs(const char *directory, const char *pcm_path) {

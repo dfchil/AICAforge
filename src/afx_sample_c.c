@@ -11,6 +11,11 @@ static int16_t read_pcm16(const uint8_t *p) {
     return (int16_t)((uint16_t)p[0] | (uint16_t)p[1] << 8);
 }
 
+/* True when count elements of size bytes can be allocated on this host. */
+static int fits_size_t(uint64_t count, size_t size) {
+    return count <= SIZE_MAX / size;
+}
+
 static unsigned rate_gcd(unsigned a, unsigned b) {
     while (b) { unsigned next = a % b; a = b; b = next; }
     return a;
@@ -61,8 +66,7 @@ int afx_c_resample_pcm16(const uint8_t *pcm16, uint32_t frames,
     pre_pad = down - half % down;
     remove = (half + pre_pad) / down;
     if (taps > UINT32_MAX - pre_pad || result_frames > UINT32_MAX - remove ||
-        (uint64_t)(taps + pre_pad) > SIZE_MAX / sizeof(*filter) ||
-        (uint64_t)result_frames > SIZE_MAX / 2u) return -1;
+        !fits_size_t(taps + pre_pad, sizeof(*filter)) || !fits_size_t(result_frames, 2u)) return -1;
     filter = calloc((size_t)taps + pre_pad, sizeof(*filter));
     result = malloc((size_t)result_frames * 2u);
     if (!filter || !result) goto failed;

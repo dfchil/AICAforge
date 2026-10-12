@@ -42,7 +42,8 @@ static int read_file(const char *path, uint8_t **out, uint32_t *out_bytes) {
     FILE *file = fopen(path, "rb"); long size; uint8_t *data = NULL;
     if (!file || fseek(file, 0, SEEK_END) || (size = ftell(file)) <= 0 || (uint64_t)size > UINT32_MAX ||
         fseek(file, 0, SEEK_SET) || !(data = malloc((size_t)size)) || fread(data, 1, (size_t)size, file) != (size_t)size) {
-        if (file) fclose(file); free(data); return -1;
+        if (file) fclose(file);
+        free(data); return -1;
     }
     fclose(file); *out = data; *out_bytes = (uint32_t)size; return 0;
 }
@@ -222,7 +223,8 @@ static uint16_t mix_word(uint8_t velocity, uint8_t channel_volume, uint8_t sampl
                                          (127.0 * 127.0 * 127.0));
     attenuation += -300.0 * log10((double)velocity / 127.0);
     double pan_cents = ((int)pan - 64) * 500.0 / 63.0;
-    if (pan_cents < -500) pan_cents = -500; if (pan_cents > 500) pan_cents = 500;
+    if (pan_cents < -500) pan_cents = -500;
+    if (pan_cents > 500) pan_cents = 500;
     double position = (pan_cents + 500) * acos(-1.0) / 2000.0;
     attenuation += -2000.0 * log10(fmax(cos(position), sin(position)) * sqrt(2.0));
     int tl = (int)lround(attenuation / 40.0); if (tl < 0) tl = 0; if (tl > 255) tl = 255;
@@ -231,7 +233,8 @@ static uint16_t mix_word(uint8_t velocity, uint8_t channel_volume, uint8_t sampl
 
 static uint16_t direct_word(uint8_t pan) {
     double pan_cents = ((int)pan - 64) * 500.0 / 63.0;
-    if (pan_cents < -500) pan_cents = -500; if (pan_cents > 500) pan_cents = 500;
+    if (pan_cents < -500) pan_cents = -500;
+    if (pan_cents > 500) pan_cents = 500;
     double angle = (pan_cents + 500) * acos(-1.0) / 2000.0, loud = fmax(cos(angle), sin(angle)), soft = fmin(cos(angle), sin(angle));
     int dipan = (int)lround(-20.0 * log10(fmax(soft / loud, 1e-9)) / (10.0 * log10(2.0)));
     if (dipan > 15) dipan = 15;
@@ -295,9 +298,11 @@ static int lower(const bank_t *bank, const afx_c_note_t *input, uint32_t input_c
         const uint8_t *keymap = bank->control + sound.keymap, *env = bank->control + sound.envelope;
         uint8_t attack_volume = env[12] ? env[12] : 1, decay_volume = env[13] ? env[13] : 1;
         int decay_level = (int)lround(-20.0 * log10((double)decay_volume / attack_volume) / 3.0103);
-        if (decay_level < 0) decay_level = 0; if (decay_level > 31) decay_level = 31;
+        if (decay_level < 0) decay_level = 0;
+        if (decay_level > 31) decay_level = 31;
         int channel_pan = (int)state->pan + sound.pan - 64;
-        if (channel_pan < 0) channel_pan = 0; if (channel_pan > 127) channel_pan = 127;
+        if (channel_pan < 0) channel_pan = 0;
+        if (channel_pan > 127) channel_pan = 127;
         afx_c_zone_t zone = {.sample = *sample, .key_min = keymap[2], .key_max = keymap[3],
             .velocity_min = keymap[0], .velocity_max = keymap[1], .bank_msb = note.bank_msb,
             .bank_lsb = note.bank_lsb, .program = note.program,
@@ -332,8 +337,10 @@ static uint16_t n64_pitch(const n64_note_t *note, const afx_c_zone_t *zone, int1
     double ratio = pow(2.0, (((int)note->note.key - zone->sample.root_key) * 100.0 + cents) / 1200.0);
     int octave = (int)floor(log2(ratio));
     int fraction = (int)(1024.0 * (ratio / pow(2.0, octave) - 1.0));
-    if (octave < -8) octave = -8; if (octave > 7) octave = 7;
-    if (fraction < 0) fraction = 0; if (fraction > 1023) fraction = 1023;
+    if (octave < -8) octave = -8;
+    if (octave > 7) octave = 7;
+    if (fraction < 0) fraction = 0;
+    if (fraction > 1023) fraction = 1023;
     return (uint16_t)(((octave & 15) << 11) | fraction);
 }
 
@@ -342,7 +349,8 @@ static uint16_t mix_for_volume(const n64_note_t *note, uint8_t volume) {
     if (!volume) return 0xff24;
     double change = -2000.0 * log10((double)volume / (note->channel_volume ? note->channel_volume : 1u));
     int total = (old >> 8) + (int)lround(change / 40.0);
-    if (total < 0) total = 0; if (total > 255) total = 255;
+    if (total < 0) total = 0;
+    if (total > 255) total = 255;
     return (uint16_t)(total << 8 | 0x24u);
 }
 
@@ -411,7 +419,8 @@ static int compile_n64(n64_note_t *notes, uint32_t note_count,
                 event.fields[AFX_FIELD_MIX] = mix_for_volume(note, source->value);
             } else if (source->control == 10) {
                 int pan = (int)source->value + note->sample_pan - 64;
-                if (pan < 0) pan = 0; if (pan > 127) pan = 127;
+                if (pan < 0) pan = 0;
+                if (pan > 127) pan = 127;
                 event.mask = 1u << AFX_FIELD_DIRECT;
                 event.fields[AFX_FIELD_DIRECT] = direct_word((uint8_t)pan);
             } else {
@@ -448,8 +457,10 @@ static uint16_t sfx_pitch(uint32_t rate, int cents) {
     double ratio = pow(2.0, ((double)cents + rate_cents) / 1200.0);
     int octave = (int)floor(log2(ratio));
     int fraction = (int)(1024.0 * (ratio / pow(2.0, octave) - 1.0));
-    if (octave < -8) octave = -8; if (octave > 7) octave = 7;
-    if (fraction < 0) fraction = 0; if (fraction > 1023) fraction = 1023;
+    if (octave < -8) octave = -8;
+    if (octave > 7) octave = 7;
+    if (fraction < 0) fraction = 0;
+    if (fraction > 1023) fraction = 1023;
     return (uint16_t)(((octave & 15) << 11) | fraction);
 }
 
@@ -494,7 +505,8 @@ static int lower_sfx(const bank_t *bank, unsigned requested, afx_c_event_t **out
         release_us = fmax(0.0, (double)sbe32(env + 8u)) / scale;
         decay_level = (int)nearbyint(-20.0 * log10((double)(env[13] ? env[13] : 1u) /
                                                  (double)(env[12] ? env[12] : 1u)) / 3.0103);
-        if (decay_level < 0) decay_level = 0; if (decay_level > 31) decay_level = 31;
+        if (decay_level < 0) decay_level = 0;
+        if (decay_level > 31) decay_level = 31;
         zones[index] = (afx_c_zone_t){.sample = *sample, .key_max = 127, .velocity_max = 127,
             .dsp_send = (uint8_t)((keymap[3] & 15u) << 4),
             .setup_mask = (1u << AFX_FIELD_ENV_AD) | (1u << AFX_FIELD_ENV_DR) | (1u << AFX_FIELD_DIRECT) |
