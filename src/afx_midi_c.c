@@ -187,6 +187,11 @@ int afx_c_midi_notes(const void *input, uint32_t bytes, uint32_t tick_rate,
     }
     memset(active_head, 0xff, sizeof(active_head)); memset(active_tail, 0xff, sizeof(active_tail));
     memset(sustained, 0xff, sizeof(sustained));
+    /* Offs sort before ons on one tick, so a retrigger releases the old note
+     * first. That puts the off of a zero-length note ahead of its own on; it is
+     * kept here (tick + 1, source order) so that note-on can still be closed. */
+    uint32_t early_off_tick[16][128], early_off_order[16][128];
+    memset(early_off_tick, 0, sizeof(early_off_tick));
     for (uint32_t i = 0; i < event_count; ++i) {
         const midi_event_t *event = events + i;
         uint8_t channel = event->channel, key = event->a;
@@ -229,10 +234,21 @@ int afx_c_midi_notes(const void *input, uint32_t bytes, uint32_t tick_rate,
                                            pitch_sensitivity[channel], pitch_bend[channel], -1, -1};
             memcpy(raw[raw_count].controllers, controllers[channel], sizeof(raw[raw_count].controllers));
             int32_t note = (int32_t)raw_count++;
-            if (active_tail[channel][key] >= 0) raw[active_tail[channel][key]].next_active = note;
-            else active_head[channel][key] = note;
-            active_tail[channel][key] = note;
-        } else if (active_head[channel][key] >= 0) {
+            if (early_off_tick[channel][key] == event->tick + 1u && early_off_order[channel][key] > event->order) {
+                early_off_tick[channel][key] = 0;
+                if (pedal[channel]) {
+                    raw[note].next_sustained = sustained[channel];
+                    sustained[channel] = note;
+                } else raw[note].end = event->tick;
+            } else {
+                if (active_tail[channel][key] >= 0) raw[active_tail[channel][key]].next_active = note;
+                else active_head[channel][key] = note;
+                active_tail[channel][key] = note;
+            }
+        } else if (active_head[channel][key] < 0) {
+            early_off_tick[channel][key] = event->tick + 1u;
+            early_off_order[channel][key] = event->order;
+        } else {
             int32_t note = active_head[channel][key];
             active_head[channel][key] = raw[note].next_active;
             if (active_head[channel][key] < 0) active_tail[channel][key] = -1;
@@ -266,7 +282,11 @@ int afx_c_midi_notes(const void *input, uint32_t bytes, uint32_t tick_rate,
         result[i].poly_pressure = raw[i].poly_pressure;
         result[i].channel_pressure = raw[i].channel_pressure;
         result[i].pitch_sensitivity = raw[i].pitch_sensitivity;
-        if (result[i].end_tick <= result[i].start_tick) { free(result); goto failed; }
+        /* A note shorter than one control tick still sounds for one. */
+        if (result[i].end_tick <= result[i].start_tick) {
+            if (result[i].start_tick == UINT32_MAX) { free(result); goto failed; }
+            result[i].end_tick = result[i].release_tick = result[i].start_tick + 1u;
+        }
     }
     free(events); free(raw); free(tempos); *out_notes = result; *out_count = raw_count; return 0;
 failed:

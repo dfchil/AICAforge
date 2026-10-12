@@ -269,7 +269,11 @@ int afx_c_n64_cseq_notes(const uint8_t *sequence, uint32_t bytes, int sequence_i
     if (!notes) goto failed;
     for (uint32_t i = 0; i < note_count; ++i) {
         if (!nodes[i].note.end_tick) nodes[i].note.end_tick = nodes[i].note.release_tick = *out_duration;
-        if (nodes[i].note.end_tick <= nodes[i].note.start_tick) { free(notes); goto failed; }
+        /* A note shorter than one control tick still sounds for one. */
+        if (nodes[i].note.end_tick <= nodes[i].note.start_tick) {
+            if (nodes[i].note.start_tick >= *out_duration) { free(notes); goto failed; }
+            nodes[i].note.end_tick = nodes[i].note.release_tick = nodes[i].note.start_tick + 1u;
+        }
         notes[i] = nodes[i].note;
     }
     *out_notes = notes; *out_count = note_count;
