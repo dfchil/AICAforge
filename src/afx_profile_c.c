@@ -517,7 +517,7 @@ static void apply_static_defaults(uint8_t *image, const afx_file_header_t *heade
 }
 
 static int apply(const char *base_path, const char *base_afc_path, const char *profile_path, const char *out_path, const char *out_afc_path, uint32_t seconds) {
-    uint8_t *afx = NULL, *afc = NULL, *derived = NULL, *derived_afc = NULL; uint32_t afx_bytes, afc_bytes, derived_bytes, derived_afc_bytes, commands, writes; afx_file_header_t header; profile_t profile; params_t static_defaults; bytes_t stream = {0}; int result = -1;
+    uint8_t *afx = NULL, *afc = NULL, *derived = NULL, *derived_afc = NULL; uint32_t afx_bytes, afc_bytes, derived_bytes, derived_afc_bytes, commands, writes; afx_file_header_t header; profile_t profile = {0}; params_t static_defaults; bytes_t stream = {0}; int result = -1;
     if (read_file(base_path, &afx, &afx_bytes) || read_file(base_afc_path, &afc, &afc_bytes) || afx_file_validate(afx, afx_bytes, &header) || !valid_seek(afc, afc_bytes, &header) || profile_read(profile_path, afx, afx_bytes, header.setup_count, &profile) || afx_c_set_work_profile(afx, afx_bytes)) goto done;
     header.work_profile = afx_read32(afx + 76);
     static_defaults = profile.defaults;
@@ -544,13 +544,15 @@ static int apply(const char *base_path, const char *base_afc_path, const char *p
     memcpy(derived, afx, header.image_offset + header.stream_offset); memcpy(derived + header.image_offset + header.stream_offset, stream.data, stream.used);
     apply_static_defaults(derived + header.image_offset, &header, &static_defaults);
     header.control_id = afx_control_id(derived + header.image_offset, header.image_size); afx_encode_header(derived, &header);
+    /* Stamp what the rewritten stream really costs, as the bank merger does. */
+    if (afx_c_set_work_profile(derived, derived_bytes)) goto done;
     if (afx_file_validate(derived, derived_bytes, NULL) || !(derived_afc = build_seek(derived, derived_bytes, &derived_afc_bytes, seconds)) || write_file(out_path, derived, derived_bytes) || write_file(out_afc_path, derived_afc, derived_afc_bytes)) goto done;
     result = 0;
 done:
     profile_free(&profile); free(stream.data); free(afx); free(afc); free(derived); free(derived_afc); return result;
 }
 static int inventory(const char *path) {
-    uint8_t *afx; uint32_t bytes, tick = 0, ordinal = 0, ordinal_tick = UINT32_MAX; afx_file_header_t header; int first = 1;
+    uint8_t *afx = NULL; uint32_t bytes, tick = 0, ordinal = 0, ordinal_tick = UINT32_MAX; afx_file_header_t header; int first = 1;
     if (read_file(path, &afx, &bytes) || afx_file_validate(afx, bytes, &header)) { free(afx); return -1; }
     puts("[");
     for (uint32_t at = header.stream_offset, end = at + header.stream_size; at < end;) {
@@ -723,13 +725,13 @@ int main(int argc, char **argv) {
         seconds = (uint32_t)value; argc -= 2;
     }
     if (argc == 6 && !strcmp(argv[1], "init")) {
-        uint8_t *afx; uint32_t bytes;
+        uint8_t *afx = NULL; uint32_t bytes;
         if (!read_file(argv[2], &afx, &bytes) && !afx_file_validate(afx, bytes, NULL) &&
             !profile_write(argv[3], afx, bytes, argv[4], (unsigned)strtoul(argv[5], NULL, 10))) { free(afx); return 0; }
         free(afx); return fprintf(stderr, "cannot create profile\n"), 1;
     }
     if (argc == 4 && !strcmp(argv[1], "describe")) {
-        uint8_t *afx; uint32_t bytes; afx_file_header_t header; profile_t profile;
+        uint8_t *afx = NULL; uint32_t bytes; afx_file_header_t header; profile_t profile;
         if (!read_file(argv[2], &afx, &bytes) && !afx_file_validate(afx, bytes, NULL) &&
             !afx_file_validate(afx, bytes, &header) && !profile_read(argv[3], afx, bytes, header.setup_count, &profile)) {
             unsigned send = profile.defaults.mask & (1u << AFX_FIELD_DSP_SEND) ? profile.defaults.values[AFX_FIELD_DSP_SEND] : 0;

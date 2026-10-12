@@ -75,4 +75,20 @@ with tempfile.TemporaryDirectory(prefix="afx-checkpoints-") as directory:
         assert subprocess.run([BIN / "afx_profile", "apply", base, seek, profile, out, afc,
                                "--checkpoint-seconds", bad], capture_output=True).returncode != 0
         assert afc.read_bytes() == before
+    # Lanes that land on one tick are one burst: the stamped work profile must
+    # be what a fresh count of the rewritten stream gives.
+    settings = json.loads(json.dumps(original))
+    settings["lanes"] = [{"event": {"kind": "note", "tick": 0, "ordinal": 0, "channel": 0},
+                          "offset": 100, "parameters": {name: value}}
+                         for name, value in (("lfo", 19024), ("dsp_send", 96), ("direct", 15))]
+    profile.write_text(json.dumps(settings))
+    out, afc = root / "lanes.afx", root / "lanes.afc"
+    subprocess.run([BIN / "afx_profile", "apply", base, seek, profile, out, afc], check=True)
+    stamped = struct.unpack_from("<I", out.read_bytes(), 76)[0]
+    out.with_suffix(".afb").write_bytes(bank.read_bytes())  # the merger reads the bank beside the flow
+    recount = root / "recount"
+    recount.mkdir()
+    subprocess.run([BIN / "afx_bank", "--merge", root / "recount.afb", recount, out], check=True)
+    assert struct.unpack_from("<I", (recount / out.name).read_bytes(), 76)[0] == stamped
+    assert stamped >> 16 == 3
 print("Profile checkpoint regeneration passed")
