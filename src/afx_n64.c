@@ -314,7 +314,8 @@ static int lower(const bank_t *bank, const afx_c_note_t *input, uint32_t input_c
         zone.setup[AFX_FIELD_ENV_DR] = (uint16_t)(envelope_rate(sbe32(env + 8u), dr_time_ms) |
                                                    decay_level << 5 | 15 << 10);
         zone.setup[AFX_FIELD_DIRECT] = direct_word((uint8_t)channel_pan);
-        if (append_zone(&zones, &zone_count, &zone_capacity, zone)) goto failed;
+        /* setup_index is 16-bit and one-based. */
+        if (zone_count >= UINT16_MAX || append_zone(&zones, &zone_count, &zone_capacity, zone)) goto failed;
         note.setup_index = (uint16_t)zone_count;
         note.source_id = note_count;
         note.mix = mix_word(note.velocity, state->volume, sound.volume, attack_volume, (uint8_t)channel_pan);
