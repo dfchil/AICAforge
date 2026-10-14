@@ -230,6 +230,8 @@ build/afx_n64 audio_control.bin audio_table.bin sequences.bin 7 song.afx
 # Select another ALBank entry when the control file contains several:
 build/afx_n64 audio_control.bin audio_table.bin sequences.bin 7 song.afx 1
 build/afx_n64 --sfx sfx_control.bin sfx_table.bin 563 collect_item.afx
+# Keep the source rate and store one-shot samples as 4-bit ADPCM:
+build/afx_n64 --sfx-adpcm sfx_control.bin sfx_table.bin 563 collect_item.afx
 ```
 
 The music mode reads B1 ALBank + S1 CSeq directly, never through MIDI. It
@@ -237,6 +239,11 @@ lowers key/velocity splits, source envelopes, tuning, pan, VADPCM/RAW16 and
 supported live CC7/CC10/CC91/pitch-bend changes to ordinary NOTE/PATCH/KEYOFF.
 An infinite source loop is cut at its first boundary to produce a finite
 audition flow. The optional last argument is a zero-based ALBank index.
+
+Each SFX sample is stored in the smallest encoding and rate that passes the
+SNR test. ADPCM rarely passes it, though it often sounds as good as PCM8;
+`--sfx-adpcm` stores one-shot samples as ADPCM at the source rate instead, at
+half PCM8's size. Looped samples keep the normal choice.
 
 SFX IDs are one-based raw ALInstrument roots, **not game `SOUND_*` enums**.
 SFX chain interpretation follows DKR's ALBank/key-map policy.

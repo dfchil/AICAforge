@@ -648,9 +648,12 @@ int afx_c_compile_zones(const afx_c_note_t *input, uint32_t count,
                 setup = scan;
             }
         if (setup == zone_count) goto failed;
+        /* Bend in cents: the full wheel covers the channel's RPN 0 range. */
+        int bend = notes[i].controller_state >> 39 ?
+                   (int)((notes[i].controller_state >> 25) & 16383u) - 8192 : 0;
         events[2 * i] = (event_t){notes[i].start_tick, 1, channels[i], notes[i].key, notes[i].velocity,
-                                  (uint16_t)setup, notes[i].mix, notes[i].controller_state >> 39 ?
-                                  (int16_t)(((notes[i].controller_state >> 25) & 16383u) - 8192) : 0};
+                                  (uint16_t)setup, notes[i].mix,
+                                  (int16_t)lround((double)bend * notes[i].pitch_sensitivity * 100.0 / 8192.0)};
         events[2 * i + 1] = (event_t){keyoff, 0, channels[i], 0, 0, 0, 0, 0};
     }
     qsort(events, 2u * count, sizeof(*events), compare_event);
@@ -664,9 +667,8 @@ int afx_c_compile_zones(const afx_c_note_t *input, uint32_t count,
         if (events[i].kind) {
             raw[i].setup = events[i].setup; raw[i].mask = AFX_NOTE_PL_MASK;
             int tuning = zones[events[i].setup].sample.tuning_cents;
-            /* MIDI's default bend range is ±2 semitones. Both SF2 pitch
-             * correction and positive bend raise the playback ratio. */
-            tuning += (int)lround((double)events[i].pitch_bend * 200.0 / 8192.0);
+            /* Both SF2 pitch correction and positive bend raise the playback ratio. */
+            tuning += events[i].pitch_bend;
             raw[i].fields[AFX_FIELD_PITCH] = pitch(events[i].key, zones[events[i].setup].sample.root_key,
                                                     tuning, zones[events[i].setup].sample.sample_rate);
             raw[i].fields[AFX_FIELD_MIX] = events[i].mix ? events[i].mix : level(events[i].velocity);

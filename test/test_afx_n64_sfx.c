@@ -67,7 +67,17 @@ int main(void) {
     event_count = zone_count = duration = 0; park = 0;
     assert(!lower_sfx(&bank, 3, &events, &event_count, &duration, &zones, &zone_count, &park));
     assert(!park && event_count == 2 && duration == 6); /* 128 frames / 22050, not / 44100. */
+    assert(zones[0].sample.format != AFX_ADPCM); /* full-scale square wave: ADPCM fails the SNR test */
     free((void *)zones[0].sample.data); free(zones); free(events);
+
+    /* --sfx-adpcm keeps the source rate and stores the one-shot sample as ADPCM. */
+    sForceAdpcm = 1;
+    event_count = zone_count = duration = 0; park = 0;
+    assert(!lower_sfx(&bank, 3, &events, &event_count, &duration, &zones, &zone_count, &park));
+    assert(zones[0].sample.format == AFX_ADPCM && zones[0].sample.sample_rate == 22050 &&
+           zones[0].sample.bytes == 64 && duration == 6);
+    free((void *)zones[0].sample.data); free(zones); free(events);
+    sForceAdpcm = 0;
 
     uint8_t quiet[] = {1, 0, 255, 255}, *encoded = NULL, format;
     uint32_t bytes, frames;

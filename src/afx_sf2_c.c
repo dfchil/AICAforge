@@ -35,6 +35,7 @@ typedef struct {
 typedef struct {
     int instrument, sample, root, mode;
     int key_lo, key_hi, velocity_lo, velocity_hi, coarse, fine;
+    unsigned tune_mask; /* bit 0: coarse given, bit 1: fine given */
     uint32_t controls_mask;
     int controls[CTRL_COUNT];
     int velocity_attenuation_amount, velocity_filter_amount;
@@ -184,8 +185,8 @@ static controls_t read_controls(const uint8_t *gens, uint32_t count, uint32_t fi
             case GEN_SAMPLE_ID: out.sample = le16(gen + 2); break;
             case GEN_KEY_RANGE: out.key_lo = gen[2]; out.key_hi = gen[3]; break;
             case GEN_VELOCITY_RANGE: out.velocity_lo = gen[2]; out.velocity_hi = gen[3]; break;
-            case GEN_COARSE_TUNE: out.coarse += sle16(gen + 2); break;
-            case GEN_FINE_TUNE: out.fine += sle16(gen + 2); break;
+            case GEN_COARSE_TUNE: out.coarse += sle16(gen + 2); out.tune_mask |= 1u; break;
+            case GEN_FINE_TUNE: out.fine += sle16(gen + 2); out.tune_mask |= 2u; break;
             case GEN_SAMPLE_MODES: out.mode = le16(gen + 2); break;
             case GEN_OVERRIDE_ROOT: out.root = le16(gen + 2) <= 127 ? le16(gen + 2) : -1; break;
             case GEN_INITIAL_FILTER_FC: control_set(&out, CTRL_FILTER_FC, sle16(gen + 2)); break;
@@ -221,9 +222,13 @@ static controls_t combine(controls_t base, controls_t local) {
     return base;
 }
 
-/* SF2 globals are defaults for their local zones. */
+/* SF2 globals are defaults for their local zones: a generator the local zone
+ * gives replaces the global one. Only preset over instrument adds. */
 static controls_t overlay(controls_t base, const controls_t *local) {
     controls_t out = combine(base, *local);
+    out.coarse = local->tune_mask & 1u ? local->coarse : base.coarse;
+    out.fine = local->tune_mask & 2u ? local->fine : base.fine;
+    out.tune_mask = base.tune_mask | local->tune_mask;
     for (unsigned i = 0; i < CTRL_COUNT; ++i)
         if (local->controls_mask & (1u << i)) {
             out.controls_mask |= 1u << i;
@@ -368,7 +373,9 @@ static int ensure_sample(resolver_t *resolver, const controls_t *controls, uint3
              loop_end = le32(header + 32), rate = le32(header + 36);
     if (!rate || start >= end || end > font->smpl_frames || (le16(header + 44) & 0x8000u)) return -1;
     int source_loop = loop_start >= start && loop_start < loop_end && loop_end <= end;
-    int keep_loop = (controls->mode & 1) && source_loop;
+    /* sampleModes defaults to 0: a zone that does not ask for a loop is a
+     * one-shot, even when its sample header carries loop points. */
+    int keep_loop = controls->mode > 0 && (controls->mode & 1) && source_loop;
     /* A looped and a one-shot use of one SF2 sample need independent cached
      * encodings: only the looped form may discard its post-loop tail. */
     decoded_t *decoded = resolver->decoded + sample_id * 2u + (unsigned)keep_loop;

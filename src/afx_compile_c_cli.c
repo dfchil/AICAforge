@@ -203,5 +203,6 @@ int main(int argc, char **argv) {
              write_file(afc_path, out.afc, out.afc_bytes) ||
              write_file(afv_path, out.afv, out.afv_bytes);
     afx_c_output_free(&out);
+    if (result) fprintf(stderr, "cannot write %s and its .afb, .afc and .afv\n", argv[argc - 1]);
     return result ? 1 : 0;
 }

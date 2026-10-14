@@ -303,6 +303,55 @@ int main(void) {
     assert(!afx_c_compile_sine(parsed, count, 1000, &out));
     assert(afx_file_validate(out.afx, out.afx_bytes, NULL) == AFX_OK);
     free(parsed); afx_c_output_free(&out);
+    /* A zero-length note (on, then its off, on one tick) used to lose its off
+       to the sort and hang until the end of the file. It now sounds for one
+       control tick, and so does a note shorter than a control tick. Division
+       480 at 600 ms per beat: one MIDI tick is 1.25 ms. */
+    const unsigned char short_midi[] = {
+        'M','T','h','d', 0,0,0,6, 0,0, 0,1, 1,224,
+        'M','T','r','k', 0,0,0,38,
+        0,0xff,0x51,3,9,39,192,
+        0,0x90,60,100, 0,0x80,60,0,          /* zero length at tick 0 */
+        0x83,0x60,0x90,62,100, 0,0x80,62,0,  /* zero length at tick 480 */
+        0x83,0x60,0x90,64,100, 0x83,0x60,0x80,64,0, /* a normal note */
+        0,0xff,0x2f,0
+    };
+    assert(!afx_c_midi_notes(short_midi, sizeof(short_midi), 1000, &parsed, &count));
+    assert(count == 3 && parsed[0].start_tick == 0 && parsed[0].end_tick == 1);
+    assert(parsed[1].start_tick == 600 && parsed[1].end_tick == 601);
+    assert(parsed[2].start_tick == 1200 && parsed[2].end_tick == 1800);
+    free(parsed);
+    /* The bend wheel covers the channel's RPN 0 range, not a fixed two
+       semitones: full bend up with a range of 12 is an octave. */
+    const unsigned char bend_midi[] = {
+        'M','T','h','d', 0,0,0,6, 0,0, 0,1, 1,224,
+        'M','T','r','k', 0,0,0,29,
+        0,0xb0,101,0, 0,0xb0,100,0, 0,0xb0,6,12,
+        0,0xe0,0x7f,0x7f, 0,0x90,69,100,
+        0x83,0x60,0x80,69,0, 0,0xff,0x2f,0
+    };
+    const unsigned char octave_midi[] = {
+        'M','T','h','d', 0,0,0,6, 0,0, 0,1, 1,224,
+        'M','T','r','k', 0,0,0,13,
+        0,0x90,81,100,
+        0x83,0x60,0x80,81,0, 0,0xff,0x2f,0
+    };
+    {
+        afx_c_output_t bent, octave;
+        afx_c_note_t *plain = NULL; unsigned plain_count = 0;
+        assert(!afx_c_midi_notes(bend_midi, sizeof(bend_midi), 1000, &parsed, &count));
+        assert(count == 1 && parsed[0].pitch_sensitivity == 12);
+        assert(!afx_c_compile_sine(parsed, count, 1000, &bent));
+        assert(!afx_c_midi_notes(octave_midi, sizeof(octave_midi), 1000, &plain, &plain_count));
+        assert(!afx_c_compile_sine(plain, plain_count, 1000, &octave));
+        /* 8191/8192 of an octave rounds to the octave's own pitch word. */
+        assert(bent.afx_bytes == octave.afx_bytes);
+        afx_file_header_t bent_header;
+        assert(afx_file_validate(bent.afx, bent.afx_bytes, &bent_header) == AFX_OK);
+        uint32_t stream = bent_header.image_offset + bent_header.stream_offset;
+        assert(!memcmp(bent.afx + stream, octave.afx + stream, bent_header.stream_size));
+        free(parsed); free(plain); afx_c_output_free(&bent); afx_c_output_free(&octave);
+    }
     /* Repeated NOTE-on for one MIDI key is a FIFO stack, not an implicit
        NOTE-off. Both notes must keep their own later key release. */
     const unsigned char repeated_key_midi[] = {

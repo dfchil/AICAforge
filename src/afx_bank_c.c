@@ -391,7 +391,7 @@ static int parse_map(const char *path, source_t **out_sources, uint32_t *out_sou
             if (fields < 3 || fields > 4 || (fields == 4 && strcmp(channel, "stereo") &&
                 strcmp(channel, "left") && strcmp(channel, "right")) ||
                 map_count || song_count || find_source(sources, source_count, item.name) ||
-                relative_path(path, item.path, resolved)) goto failed;
+                relative_path(path, item.path, resolved) || strlen(resolved) >= sizeof(item.path)) goto failed;
             item.channel = fields == 4 && !strcmp(channel, "left") ? AFX_C_SF2_LEFT :
                            fields == 4 && !strcmp(channel, "right") ? AFX_C_SF2_RIGHT : AFX_C_SF2_STEREO;
             strcpy(item.path, resolved);
@@ -433,7 +433,7 @@ static int parse_map(const char *path, source_t **out_sources, uint32_t *out_sou
                                              item.midi, &item.tick_rate, &item.release_tail_ms) - 1;
             if ((fields != 2 && fields != 3 && fields != 4) || !item.tick_rate || item.tick_rate > 1000000 ||
                 item.release_tail_ms > 10000 ||
-                relative_path(path, item.midi, resolved)) goto failed;
+                relative_path(path, item.midi, resolved) || strlen(resolved) >= sizeof(item.midi)) goto failed;
             strcpy(item.midi, resolved);
             for (uint32_t i = 0; i < song_count; ++i) if (!strcmp(songs[i].name, item.name)) goto failed;
             song_t *grown = realloc(songs, (size_t)(song_count + 1u) * sizeof(*songs));
