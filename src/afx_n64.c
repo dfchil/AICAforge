@@ -154,6 +154,10 @@ static int make_pcm16(const bank_t *bank, uint32_t wavetable, uint8_t **out, uin
     *out = pcm; *out_frames = frames; return 0;
 }
 
+/* --sfx-adpcm: store one-shot SFX samples as ADPCM at the source rate instead of
+ * the smallest encoding that passes the SNR test, which is almost never ADPCM. */
+static int sForceAdpcm;
+
 static int cache_sample(const bank_t *bank, uint32_t wavetable, int sfx, cached_sample_t **items,
                         uint32_t *count, uint32_t *capacity, const afx_c_sample_t **out) {
     for (uint32_t i = 0; i < *count; ++i) if ((*items)[i].wavetable == wavetable) { *out = &(*items)[i].sample; return 0; }
@@ -169,7 +173,11 @@ static int cache_sample(const bank_t *bank, uint32_t wavetable, int sfx, cached_
     if (source_frames > 65535u) rate = (uint32_t)((uint64_t)65535u * bank->rate / source_frames);
     uint32_t bytes; uint8_t format;
     if (rate < 4000u) goto failed;
-    if (sfx) {
+    if (sfx && sForceAdpcm && !looping) {
+        if (afx_c_resample_pcm16(source, source_frames, bank->rate, rate, &resampled, &frames) || !frames ||
+            frames > 65535u || afx_c_encode_sample(resampled, frames, looping, AFX_ADPCM, &encoded, &bytes, &format))
+            goto failed;
+    } else if (sfx) {
         const uint32_t rates[] = {rate, 16000, 11025, 8000};
         uint32_t best_bytes = UINT32_MAX;
         for (uint32_t i = 0; i < sizeof(rates) / sizeof(*rates); ++i) {
@@ -586,12 +594,14 @@ done:
 }
 
 int main(int argc, char **argv) {
-    if (argc == 6 && !strcmp(argv[1], "--sfx"))
+    if (argc == 6 && (!strcmp(argv[1], "--sfx") || !strcmp(argv[1], "--sfx-adpcm"))) {
+        sForceAdpcm = !strcmp(argv[1], "--sfx-adpcm");
         return write_sfx(argv[2], argv[3], argv[4], argv[5]) ?
             (fprintf(stderr, "afx_n64: invalid SFX source or AICA limits exceeded\n"), 1) : 0;
+    }
     if (argc < 6 || argc > 7) {
         fprintf(stderr, "usage: afx_n64 CONTROL.b1 TABLE.tbl SEQUENCES.s1 INDEX OUTPUT.afx [BANK_INDEX]\n"
-                        "       afx_n64 --sfx CONTROL.b1 TABLE.tbl SOUND_ID OUTPUT.afx\n");
+                        "       afx_n64 --sfx|--sfx-adpcm CONTROL.b1 TABLE.tbl SOUND_ID OUTPUT.afx\n");
         return 2;
     }
     char *end = NULL; long index = strtol(argv[4], &end, 10);

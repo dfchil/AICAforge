@@ -5,6 +5,11 @@
 Changes since 0.1.0-rc1. The entries up to 2026-10-09 were reconstructed from
 the commit history.
 
+### Added
+
+- `afx_n64 --sfx-adpcm` stores one-shot SFX samples as ADPCM at the source
+  rate, at half the size of PCM8.
+
 ### Changed
 
 - Compiled flows carry an authored work profile, which lets the AICAflow
