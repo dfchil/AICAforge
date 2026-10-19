@@ -428,8 +428,19 @@ static int write_wait(bytes_t *stream, uint32_t ticks) {
     };
     return bytes_event(stream, &wait, NULL);
 }
+/* Advance the output timeline to `next`, keeping an instruction boundary at the
+ * flow's loop tick (the LOOP's target in the rewritten stream). */
+static int advance_to(bytes_t *stream, uint32_t *tick, uint32_t next, uint32_t loop_tick, uint32_t *loop_offset) {
+    if (*loop_offset == UINT32_MAX && loop_tick >= *tick && loop_tick <= next) {
+        if (loop_tick > *tick && write_wait(stream, loop_tick - *tick)) return -1;
+        *tick = loop_tick; *loop_offset = stream->used;
+    }
+    if (next > *tick && write_wait(stream, next - *tick)) return -1;
+    *tick = next; return 0;
+}
 static int rewrite_stream(const uint8_t *image, const afx_file_header_t *header, profile_t *profile, bytes_t *stream, uint32_t *max_commands, uint32_t *max_writes) {
     uint32_t at = header->stream_offset, end = at + header->stream_size, tick = 0, ordinal = 0, ordinal_tick = UINT32_MAX, commands = 0, writes = 0;
+    uint32_t loop_tick = header->flags & AFX_FLAG_LOOP ? header->loop_tick : UINT32_MAX, loop_offset = UINT32_MAX;
     params_t active[AFX_MAX_FLOW_CHANNELS] = {{0}}; bool active_note[AFX_MAX_FLOW_CHANNELS] = {0}; *max_commands = *max_writes = 0;
     while (at < end) {
         afx_event_t event; uint16_t values[AFX_FIELD_COUNT];
@@ -444,10 +455,10 @@ static int rewrite_stream(const uint8_t *image, const afx_file_header_t *header,
                     if (profile->lanes[i].pending && profile->lanes[i].pending_tick <= next &&
                         (!lane || profile->lanes[i].pending_tick < lane->pending_tick)) lane = &profile->lanes[i];
                 if (!lane) break;
-                if (lane->pending_tick > tick && write_wait(stream, lane->pending_tick - tick)) return -1;
+                if (advance_to(stream, &tick, lane->pending_tick, loop_tick, &loop_offset)) return -1;
                 if (commands > *max_commands) *max_commands = commands;
                 if (writes > *max_writes) *max_writes = writes;
-                commands = writes = 0; tick = lane->pending_tick;
+                commands = writes = 0;
                 if (!active_note[lane->channel]) return -1;
                 event = (afx_event_t){.opcode = AFX_OP_PATCH, .channel = lane->channel, .mask = lane->parameters.mask};
                 memset(values, 0, sizeof(values));
@@ -457,11 +468,16 @@ static int rewrite_stream(const uint8_t *image, const afx_file_header_t *header,
                 if (commands > AFX_EXECUTION_BUDGET_COMMANDS || writes > AFX_EXECUTION_BUDGET_WRITES || bytes_event(stream, &event, values)) return -1;
                 lane->pending = false; lane->used = true;
             }
-            if (next > tick && write_wait(stream, next - tick)) return -1;
+            if (advance_to(stream, &tick, next, loop_tick, &loop_offset)) return -1;
             if (commands > *max_commands) *max_commands = commands;
             if (writes > *max_writes) *max_writes = writes;
-            commands = writes = 0; tick = next;
+            commands = writes = 0;
             continue;
+        }
+        else if (event.opcode == AFX_OP_LOOP) {
+            /* The target follows the rewritten boundary at the loop tick. */
+            if (loop_offset == UINT32_MAX && !(advance_to(stream, &tick, loop_tick, loop_tick, &loop_offset) == 0 && loop_offset != UINT32_MAX)) return -1;
+            event.target = loop_offset;
         }
         else if (event.opcode == AFX_OP_NOTE) {
             if (event.setup >= header->setup_count) return -1;
@@ -541,7 +557,8 @@ static int apply(const char *base_path, const char *base_afc_path, const char *p
     memcpy(derived, afx, header.image_offset + header.stream_offset); memcpy(derived + header.image_offset + header.stream_offset, stream.data, stream.used);
     apply_static_defaults(derived + header.image_offset, &header, &static_defaults);
     header.control_id = afx_control_id(derived + header.image_offset, header.image_size); afx_encode_header(derived, &header);
-    if (afx_file_validate(derived, derived_bytes, NULL) || !(derived_afc = build_seek(derived, derived_bytes, &derived_afc_bytes, seconds)) || write_file(out_path, derived, derived_bytes) || write_file(out_afc_path, derived_afc, derived_afc_bytes)) goto done;
+    /* The validator's profile also joins the bursts a LOOP runs together. */
+    if (afx_c_set_work_profile(derived, derived_bytes) || !(derived_afc = build_seek(derived, derived_bytes, &derived_afc_bytes, seconds)) || write_file(out_path, derived, derived_bytes) || write_file(out_afc_path, derived_afc, derived_afc_bytes)) goto done;
     result = 0;
 done:
     profile_free(&profile); free(stream.data); free(afx); free(afc); free(derived); free(derived_afc); return result;

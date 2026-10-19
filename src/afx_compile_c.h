@@ -111,6 +111,10 @@ int afx_c_assign_channels(const afx_c_note_t *notes, uint32_t count,
 int afx_c_compile_zones(const afx_c_note_t *notes, uint32_t count,
                         uint32_t tick_rate, const afx_c_zone_t *zones,
                         uint32_t zone_count, afx_c_output_t *out);
+/* As afx_c_compile_zones, looping back to loop_tick (see afx_c_compile_events_loop). */
+int afx_c_compile_zones_loop(const afx_c_note_t *notes, uint32_t count,
+                             uint32_t tick_rate, uint32_t loop_tick, const afx_c_zone_t *zones,
+                             uint32_t zone_count, afx_c_output_t *out);
 
 /* Assemble a bank-bound AFX from already-resolved NOTE, PATCH and KEYOFF
  * events. `duration_ticks` is the source's final control tick.
@@ -120,6 +124,18 @@ int afx_c_compile_events(const afx_c_event_t *events, uint32_t count,
                          uint32_t duration_ticks, uint32_t tick_rate,
                          const afx_c_zone_t *zones, uint32_t zone_count,
                          afx_c_output_t *out);
+/* As above, for a flow that repeats: the stream ends with LOOP back to the
+ * instruction boundary at `loop_tick` (an authored tick before
+ * duration_ticks; a WAIT is split there if no event falls on it), the header
+ * carries AFX_FLAG_LOOP and loop_tick, and the work profile joins the burst
+ * before the LOOP with the one at its target. Voices sounding at the end are
+ * not keyed off by the loop: author KEYOFFs where the source cuts them. A
+ * controlled (PARK) flow cannot loop. AFX_C_NO_LOOP compiles a finite flow. */
+#define AFX_C_NO_LOOP UINT32_MAX
+int afx_c_compile_events_loop(const afx_c_event_t *events, uint32_t count,
+                              uint32_t duration_ticks, uint32_t loop_tick, uint32_t tick_rate,
+                              const afx_c_zone_t *zones, uint32_t zone_count,
+                              afx_c_output_t *out);
 
 /* Compile a resolved timeline against one explicit sample. All output sidecars
  * are allocated with the AFB/AFX pair and released by afx_c_output_free(). */

@@ -523,7 +523,8 @@ int afx_c_set_work_profile(uint8_t *afx, uint32_t bytes) {
 static int assemble_output(const afx_c_zone_t *zones, uint32_t zone_count,
                            const afx_c_zone_t *bank_zones, uint32_t bank_zone_count,
                            const uint8_t *stream, uint32_t stream_bytes,
-                           uint32_t channels, uint32_t tick_rate, int controlled, afx_c_output_t *out) {
+                           uint32_t channels, uint32_t tick_rate, int controlled, uint32_t loop_tick,
+                           afx_c_output_t *out) {
     uint32_t *offsets = NULL, sample_bytes = 0;
     if (!zones || !zone_count || zone_count > UINT16_MAX ||
         !bank_zones || !bank_zone_count || bank_zone_count > UINT16_MAX || !stream || !stream_bytes ||
@@ -593,7 +594,9 @@ sample_known:;
     memcpy(setup + zone_count * AFX_SETUP_BYTES, stream, stream_bytes);
     uint32_t control_id = afx_control_id(setup, image_bytes);
     afx_write32(afx, AFX_FILE_MAGIC); afx_write32(afx + 4, AFX_FILE_VERSION); afx_write32(afx + 8, out->afx_bytes);
-    afx_write32(afx + 12, controlled ? AFX_FLAG_CONTROLLED : AFX_FLAG_MUSIC); afx_write32(afx + 16, image_at); afx_write32(afx + 20, image_bytes);
+    afx_write32(afx + 12, (controlled ? AFX_FLAG_CONTROLLED : AFX_FLAG_MUSIC) | (loop_tick != AFX_C_NO_LOOP ? AFX_FLAG_LOOP : 0));
+    afx_write32(afx + 16, image_at); afx_write32(afx + 20, image_bytes);
+    afx_write32(afx + 56, loop_tick != AFX_C_NO_LOOP ? loop_tick : 0);
     afx_write32(afx + 24, zone_count * AFX_SETUP_BYTES); afx_write32(afx + 28, stream_bytes); afx_write32(afx + 32, control_id);
     afx_write32(afx + 36, zone_count); afx_write32(afx + 40, bank_id); afx_write32(afx + 44, afx_read32(out->afb + 12));
     afx_write32(afx + 48, AFX_HEADER); afx_write32(afx + 52, zone_count); afx_write32(afx + 64, channels);
@@ -606,7 +609,7 @@ failed:
 }
 
 static int compile_events(const afx_c_event_t *input, uint32_t count,
-                          uint32_t duration_ticks, uint32_t tick_rate,
+                          uint32_t duration_ticks, uint32_t loop_tick, uint32_t tick_rate,
                           const afx_c_zone_t *zones, uint32_t zone_count,
                           const afx_c_zone_t *bank_zones, uint32_t bank_zone_count,
                           afx_c_output_t *out);
@@ -614,6 +617,11 @@ static int compile_events(const afx_c_event_t *input, uint32_t count,
 int afx_c_compile_zones(const afx_c_note_t *input, uint32_t count,
                         uint32_t tick_rate, const afx_c_zone_t *zones,
                         uint32_t zone_count, afx_c_output_t *out) {
+    return afx_c_compile_zones_loop(input, count, tick_rate, AFX_C_NO_LOOP, zones, zone_count, out);
+}
+int afx_c_compile_zones_loop(const afx_c_note_t *input, uint32_t count,
+                             uint32_t tick_rate, uint32_t loop_tick, const afx_c_zone_t *zones,
+                             uint32_t zone_count, afx_c_output_t *out) {
     if (!out || !input || !count || !tick_rate || !zones || !zone_count || zone_count > UINT16_MAX)
         return -1;
     *out = (afx_c_output_t){0};
@@ -673,7 +681,7 @@ int afx_c_compile_zones(const afx_c_note_t *input, uint32_t count,
         }
     }
     if (afx_c_optimize_events(raw, 2u * count, zones, zone_count, &optimized, &templates, &template_count) ||
-        compile_events(optimized, 2u * count, final_end, tick_rate, templates, template_count,
+        compile_events(optimized, 2u * count, final_end, loop_tick, tick_rate, templates, template_count,
                        zones, zone_count, out)) goto failed;
     free(channels); free(notes); free(events); free(raw); free(optimized); free(templates); return 0;
 failed:
@@ -688,17 +696,21 @@ static int compare_control_event(const void *left, const void *right) {
 }
 
 static int compile_events(const afx_c_event_t *input, uint32_t count,
-                          uint32_t duration_ticks, uint32_t tick_rate,
+                          uint32_t duration_ticks, uint32_t loop_tick, uint32_t tick_rate,
                           const afx_c_zone_t *zones, uint32_t zone_count,
                           const afx_c_zone_t *bank_zones, uint32_t bank_zone_count,
                           afx_c_output_t *out) {
     afx_c_event_t *events = NULL;
     uint8_t *stream = NULL;
-    uint32_t cursor = 0, previous = 0, channels = 0, commands = 0, writes = 0;
+    /* The loop target: the stream offset of the instruction boundary at loop_tick. */
+    uint32_t cursor = 0, previous = 0, channels = 0, commands = 0, writes = 0, loop_offset = UINT32_MAX;
+    int loop = loop_tick != AFX_C_NO_LOOP;
     if (!out || !input || !count || !tick_rate || !zones || !zone_count ||
-        count > (UINT32_MAX - 6u) / 49u) return -1;
+        count > (UINT32_MAX - 16u) / 49u || (loop && loop_tick >= duration_ticks)) return -1;
     *out = (afx_c_output_t){0};
-    events = malloc(count * sizeof(*events)); stream = malloc(count * 49u + 6u);
+    /* Per event at most 5 wait bytes + 44 event bytes; then the boundary wait,
+     * the final wait and the LOOP at the end. */
+    events = malloc(count * sizeof(*events)); stream = malloc(count * 49u + 16u);
     if (!events || !stream) goto failed;
     memcpy(events, input, count * sizeof(*events)); qsort(events, count, sizeof(*events), compare_control_event);
     for (uint32_t i = 0; i < count; ++i) {
@@ -716,11 +728,16 @@ static int compile_events(const afx_c_event_t *input, uint32_t count,
             if (source->mask) goto failed;
             ++writes;
         } else if (source->opcode == AFX_OP_PARK) {
-            if (source->mask || !i || i + 1u != count || source->tick != duration_ticks) goto failed;
+            if (source->mask || !i || i + 1u != count || source->tick != duration_ticks || loop) goto failed;
         } else goto failed;
         ++commands;
         if (commands > AFX_EXECUTION_BUDGET_COMMANDS || writes > AFX_EXECUTION_BUDGET_WRITES) goto failed;
         if (i + 1u == count || events[i + 1].tick != source->tick) commands = writes = 0;
+        if (loop && loop_offset == UINT32_MAX && loop_tick <= source->tick) {
+            /* The boundary the LOOP returns to: split the wait at the loop tick. */
+            cursor += encode_wait(stream + cursor, loop_tick - previous); previous = loop_tick;
+            loop_offset = cursor;
+        }
         cursor += encode_wait(stream + cursor, source->tick - previous); previous = source->tick;
         afx_event_t wire = {.opcode = source->opcode, .channel = source->channel,
                             .setup = source->setup, .mask = source->mask};
@@ -734,9 +751,17 @@ static int compile_events(const afx_c_event_t *input, uint32_t count,
         if (source->channel + 1u > channels) channels = source->channel + 1u;
     }
     int controlled = events[count - 1u].opcode == AFX_OP_PARK;
-    if (!controlled) { cursor += encode_wait(stream + cursor, duration_ticks - previous); stream[cursor++] = AFX_OP_END; }
+    if (!controlled) {
+        if (loop && loop_offset == UINT32_MAX) {
+            cursor += encode_wait(stream + cursor, loop_tick - previous); previous = loop_tick;
+            loop_offset = cursor;
+        }
+        cursor += encode_wait(stream + cursor, duration_ticks - previous);
+        if (loop) { stream[cursor++] = AFX_OP_LOOP; afx_write32(stream + cursor, loop_offset); cursor += 4; }
+        else stream[cursor++] = AFX_OP_END;
+    }
     if (assemble_output(zones, zone_count, bank_zones, bank_zone_count,
-                        stream, cursor, channels, tick_rate, controlled, out)) goto failed;
+                        stream, cursor, channels, tick_rate, controlled, loop_tick, out)) goto failed;
     free(events); free(stream); return 0;
 failed:
     free(events); free(stream); afx_c_output_free(out); return -1;
@@ -746,7 +771,14 @@ int afx_c_compile_events(const afx_c_event_t *input, uint32_t count,
                          uint32_t duration_ticks, uint32_t tick_rate,
                          const afx_c_zone_t *zones, uint32_t zone_count,
                          afx_c_output_t *out) {
-    return compile_events(input, count, duration_ticks, tick_rate, zones, zone_count,
+    return compile_events(input, count, duration_ticks, AFX_C_NO_LOOP, tick_rate, zones, zone_count,
+                          zones, zone_count, out);
+}
+int afx_c_compile_events_loop(const afx_c_event_t *input, uint32_t count,
+                              uint32_t duration_ticks, uint32_t loop_tick, uint32_t tick_rate,
+                              const afx_c_zone_t *zones, uint32_t zone_count,
+                              afx_c_output_t *out) {
+    return compile_events(input, count, duration_ticks, loop_tick, tick_rate, zones, zone_count,
                           zones, zone_count, out);
 }
 
