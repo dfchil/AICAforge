@@ -388,8 +388,7 @@ static int bytes_reserve(bytes_t *out, uint32_t bytes) {
 }
 static int bytes_event(bytes_t *out, const afx_event_t *event, const uint16_t values[AFX_FIELD_COUNT]) {
     uint8_t encoded[8 + AFX_SETUP_BYTES]; uint32_t bytes; afx_event_t compact = *event;
-    if (compact.opcode == AFX_OP_NOTE && compact.mask == AFX_NOTE_PL_MASK) compact.opcode = AFX_OP_NOTE_PL;
-    else if (compact.opcode == AFX_OP_PATCH && compact.mask == (1u << AFX_FIELD_TOTAL_LEVEL)) compact.opcode = AFX_OP_PATCH_LEVEL;
+    compact.opcode = afx_compact_opcode(compact.opcode, compact.mask);
     if (afx_encode_event(encoded, sizeof(encoded), &compact, values, &bytes) || bytes > UINT32_MAX - out->used || bytes_reserve(out, out->used + bytes)) return -1;
     memcpy(out->data + out->used, encoded, bytes); out->used += bytes; return 0;
 }

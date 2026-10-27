@@ -750,8 +750,7 @@ static int compile_events(const afx_c_event_t *input, uint32_t count,
         cursor += encode_wait(stream + cursor, tick - previous); previous = tick;
         afx_event_t wire = {.opcode = source->opcode, .channel = source->channel,
                             .setup = source->setup, .mask = source->mask};
-        if (wire.opcode == AFX_OP_NOTE && wire.mask == AFX_NOTE_PL_MASK) wire.opcode = AFX_OP_NOTE_PL;
-        if (wire.opcode == AFX_OP_PATCH && wire.mask == (1u << AFX_FIELD_TOTAL_LEVEL)) wire.opcode = AFX_OP_PATCH_LEVEL;
+        wire.opcode = afx_compact_opcode(wire.opcode, wire.mask);
         uint16_t values[AFX_FIELD_COUNT]; uint32_t selected = 0, written = 0;
         for (uint32_t field = 0; field < AFX_FIELD_COUNT; ++field)
             if (source->mask & (1u << field)) values[selected++] = source->fields[field];

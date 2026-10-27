@@ -37,3 +37,9 @@ with TemporaryDirectory() as directory:
     assert not any(heights[180:]), "key-off clears the target; the player supplies the release fade"
     assert visual.band(80.0, 80.0, 5000.0) == 0
     assert visual.band(5000.0, 80.0, 5000.0) == visual.BANDS - 1
+
+# The compact PATCH forms decode with their fixed fields.
+for opcode, values in ((visual.PATCH_LEVEL, [0x1234]), (visual.PATCH_ENV, [0x4321]),
+                       (visual.PATCH_ENV_LEVEL, [0x4321, 0x1234])):
+    wire = bytes((opcode, 3)) + struct.pack(f"<{len(values)}H", *values)
+    assert visual.event(wire, 0) == (opcode, len(wire), 3, None, visual.COMPACT_PATCH[opcode], values)
