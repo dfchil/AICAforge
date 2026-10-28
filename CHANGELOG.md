@@ -14,6 +14,11 @@ the commit history.
   apply` carries the loop through its rewrite, and the research decoder reads
   it. Needs the pinned AICAflow with `AFX_OP_LOOP` (firmware ABI 9). The CSeq
   importer does not emit it yet.
+- The compiler and `afx_profile` pick compact encodings through AICAflow's
+  `afx_compact_opcode()`, so a PATCH of only ENV_AD, or of ENV_AD and the
+  level, is written as `PATCH_ENV` (4 bytes) or `PATCH_ENV_LEVEL` (6 bytes)
+  instead of a full PATCH (10 or 12). The research decoder reads both. Needs
+  the pinned AICAflow with those opcodes (format API 3, firmware ABI 10).
 - `afx_n64 --sfx-adpcm` stores one-shot SFX samples as ADPCM at the source
   rate, at half the size of PCM8.
 

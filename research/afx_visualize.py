@@ -21,7 +21,12 @@ SETUP_BYTES = FIELDS * 2
 AFX_MAGIC = 0x32584641
 WAIT8, WAIT16, WAIT32 = 1, 2, 3
 NOTE, PATCH, KEYOFF, NOTE_PL, PATCH_LEVEL, LOOP = 0x10, 0x11, 0x12, 0x14, 0x15, 0x16
-PITCH, TOTAL_LEVEL = 6, 10
+PATCH_ENV, PATCH_ENV_LEVEL = 0x17, 0x18
+ENV_AD, PITCH, TOTAL_LEVEL = 4, 6, 10
+# The compact PATCH forms and the fields each carries.
+COMPACT_PATCH = {PATCH_LEVEL: 1 << TOTAL_LEVEL, PATCH_ENV: 1 << ENV_AD,
+                 PATCH_ENV_LEVEL: (1 << ENV_AD) | (1 << TOTAL_LEVEL)}
+PATCHES = (PATCH, *COMPACT_PATCH)
 
 
 def words(data: bytes, offset: int, count: int) -> list[int]:
@@ -42,8 +47,9 @@ def event(data: bytes, cursor: int) -> tuple[int, int, int | None, int | None, i
     if opcode == NOTE_PL:
         return opcode, 8, data[cursor + 1], struct.unpack_from("<H", data, cursor + 2)[0], \
             (1 << PITCH) | (1 << TOTAL_LEVEL), words(data, cursor + 4, 2)
-    if opcode == PATCH_LEVEL:
-        return opcode, 4, data[cursor + 1], None, 1 << TOTAL_LEVEL, words(data, cursor + 2, 1)
+    if opcode in COMPACT_PATCH:
+        count = bin(COMPACT_PATCH[opcode]).count("1")
+        return opcode, 2 + 2 * count, data[cursor + 1], None, COMPACT_PATCH[opcode], words(data, cursor + 2, count)
     if opcode in (NOTE, PATCH):
         prefix = 8 if opcode == NOTE else 6
         channel = data[cursor + 1]
@@ -70,11 +76,11 @@ def decode(path: Path) -> tuple[list[tuple[int, tuple]], int, int, int, list[lis
     while cursor < end:
         opcode, size, channel, setup, mask, values = event(image, cursor)
         if cursor + size > end: raise ValueError("invalid AFX event bounds")
-        if opcode in (NOTE, PATCH, NOTE_PL, PATCH_LEVEL) and mask >> FIELDS:
+        if opcode in (NOTE, NOTE_PL, *PATCHES) and mask >> FIELDS:
             raise ValueError("invalid AFX event mask")
         cursor += size
         if opcode in (WAIT8, WAIT16, WAIT32): tick += mask
-        elif opcode in (NOTE, NOTE_PL, PATCH, PATCH_LEVEL, KEYOFF):
+        elif opcode in (NOTE, NOTE_PL, *PATCHES, KEYOFF):
             if channel is None or channel >= 64: raise ValueError("invalid AFX channel")
             if setup is not None and setup >= len(setups): raise ValueError("invalid AFX setup")
             actions.append((tick, (opcode, channel, setup, mask, values)))
@@ -134,7 +140,7 @@ def build(afx: Path) -> bytes:
                 voice_frequency = 440.0 * 2.0 ** ((keys[note] - 69) / 12.0) if keys is not None else None
                 active[channel] = (state, voice_frequency, actions[action][0])
                 note += 1
-            elif opcode in (PATCH, PATCH_LEVEL) and active[channel] is not None:
+            elif opcode in PATCHES and active[channel] is not None:
                 apply(active[channel][0], mask, values.copy())
             elif opcode == KEYOFF: active[channel] = None
             action += 1
