@@ -174,6 +174,23 @@ deterministic offline lowering step: it modifies NOTE level and KEYOFF timing,
 but adds no SH4 or ARM7 feature. `lfo-rate-steps` must be `0`; rate variation
 is not implemented. Put deliberate rhythmic edits in the MIDI source.
 
+## Looping songs
+
+A song that repeats ends with `LOOP` instead of `END` (AICAflow's
+`AFX_OP_LOOP`, header flag `AFX_FLAG_LOOP` and `loop_tick`): the ARM7
+continues at the loop tick in the same tick, without a gap, until the host
+stops the instance. Append `--loop-tick N` to `afx_compile` (with `--zones` or
+`--sf2`; N is an authored tick, 1000 per second, before the song's end), or
+call `afx_c_compile_zones_loop()` / `afx_c_compile_events_loop()` from C. The
+compiler keeps an instruction boundary at the loop tick, splitting a wait if
+no event falls on it, and joins the burst before the LOOP with the one at its
+target in the work profile. Notes sounding at the end keep sounding across the
+loop unless the source keys them off; a NOTE at the target replaces the voice
+on its channel. `afx_profile apply` keeps the loop (its target follows the
+rewritten stream); `afx_bank --merge` copies it unchanged. Seek checkpoints
+cover the first pass. The N64 CSeq importer still stops at an infinite compact
+loop; it does not emit LOOP yet.
+
 ## Performance profiles
 
 `build/afx_profile init` creates an editable JSON `.afp` file from an

@@ -20,7 +20,7 @@ FIELDS = 18
 SETUP_BYTES = FIELDS * 2
 AFX_MAGIC = 0x32584641
 WAIT8, WAIT16, WAIT32 = 1, 2, 3
-NOTE, PATCH, KEYOFF, NOTE_PL, PATCH_LEVEL = 0x10, 0x11, 0x12, 0x14, 0x15
+NOTE, PATCH, KEYOFF, NOTE_PL, PATCH_LEVEL, LOOP = 0x10, 0x11, 0x12, 0x14, 0x15, 0x16
 PITCH, TOTAL_LEVEL = 6, 10
 
 
@@ -37,6 +37,7 @@ def event(data: bytes, cursor: int) -> tuple[int, int, int | None, int | None, i
     if opcode == WAIT8: return opcode, 2, None, None, data[cursor + 1], []
     if opcode == WAIT16: return opcode, 3, None, None, struct.unpack_from("<H", data, cursor + 1)[0], []
     if opcode == WAIT32: return opcode, 5, None, None, struct.unpack_from("<I", data, cursor + 1)[0], []
+    if opcode == LOOP: return opcode, 5, None, None, struct.unpack_from("<I", data, cursor + 1)[0], []
     if opcode == KEYOFF: return opcode, 2, data[cursor + 1], None, 0, []
     if opcode == NOTE_PL:
         return opcode, 8, data[cursor + 1], struct.unpack_from("<H", data, cursor + 2)[0], \
@@ -77,7 +78,7 @@ def decode(path: Path) -> tuple[list[tuple[int, tuple]], int, int, int, list[lis
             if channel is None or channel >= 64: raise ValueError("invalid AFX channel")
             if setup is not None and setup >= len(setups): raise ValueError("invalid AFX setup")
             actions.append((tick, (opcode, channel, setup, mask, values)))
-        elif opcode in (0, 0x13):
+        elif opcode in (0, 0x13, LOOP):
             if cursor != end: raise ValueError("AFX terminal event is not final")
             break
     return actions, tick, rate_num, rate_den, setups

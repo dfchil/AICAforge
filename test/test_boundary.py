@@ -18,5 +18,5 @@ for source in (root / "src").iterdir():
         assert ".." not in include and "driver/" not in include, (source, include)
         if include.startswith("aicaflow/"):
             assert (public / include).is_file(), (source, include)
-assert "#define AFX_FORMAT_API_VERSION 1" in (public / "aicaflow/format.h").read_text()
+assert "#define AFX_FORMAT_API_VERSION 2" in (public / "aicaflow/format.h").read_text()
 print("Standalone authoring dependency boundary checks passed")

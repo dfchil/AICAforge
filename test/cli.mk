@@ -41,6 +41,13 @@ check:
 	$(BIN)/afx_profile apply "$$task_tmp/fixture.afx" "$$task_tmp/fixture.afc" "$$task_tmp/fixture.afp" \
 	"$$task_tmp/lane.afx" "$$task_tmp/lane.afc" && $(VALIDATOR) "$$task_tmp/lane.afx" && \
 	PYTHONPATH=$(RESEARCH) python3 -c 'import sys; from pathlib import Path; from afx_visualize import decode,NOTE_PL,PATCH_LEVEL; actions,*_=decode(Path(sys.argv[1])); assert any(tick == 0 and event[0] == NOTE_PL and event[4][-1] == 234 for tick,event in actions); assert any(tick == 1 and event[0] == PATCH_LEVEL and event[4] == [123] for tick,event in actions)' "$$task_tmp/lane.afx" && \
+	$(BIN)/afx_compile "$$task_tmp/fixture.mid" --zones "$$task_tmp/fixture.zones" \
+	"$$task_tmp/loop.afb" "$$task_tmp/loop.afx" --loop-tick 1500 && $(VALIDATOR) "$$task_tmp/loop.afx" && \
+	$(BIN)/afx_profile init "$$task_tmp/loop.afx" "$$task_tmp/loop.afp" dry 0 && \
+	PYTHONPATH=$(RESEARCH) python3 -c 'import json,sys; from pathlib import Path; from afx_visualize import decode,NOTE,NOTE_PL; p=Path(sys.argv[1]); x=json.loads(p.read_text()); actions,*_=decode(Path(sys.argv[2])); tick,(_,channel,_,_,_)=next((tick,event) for tick,event in actions if event[0] in (NOTE,NOTE_PL)); x["lanes"]=[{"event":{"kind":"note","tick":tick,"ordinal":0,"channel":channel},"offset":1,"parameters":{"mix":123}}]; p.write_text(json.dumps(x))' "$$task_tmp/loop.afp" "$$task_tmp/loop.afx" && \
+	$(BIN)/afx_profile apply "$$task_tmp/loop.afx" "$$task_tmp/loop.afc" "$$task_tmp/loop.afp" \
+	"$$task_tmp/loop-lane.afx" "$$task_tmp/loop-lane.afc" && $(VALIDATOR) "$$task_tmp/loop-lane.afx" && \
+	PYTHONPATH=$(RESEARCH) python3 -c 'import struct,sys; from pathlib import Path; from afx_visualize import event,LOOP,WAIT8,WAIT16,WAIT32,PATCH_LEVEL; data=Path(sys.argv[1]).read_bytes(); h=struct.unpack_from("<20I",data); assert h[3] & 32 and h[14] == 1500; stream=data[h[4]+h[6]:h[4]+h[6]+h[7]]; assert stream[-5] == LOOP; target=struct.unpack_from("<I",stream,len(stream)-4)[0]; exec("cursor=tick=0\nseen=set()\nwhile cursor < len(stream) - 5:\n    op,size,_,_,mask,_=event(stream,cursor); seen.add(op)\n    if cursor == target: assert tick == 1500\n    tick += mask if op in (WAIT8,WAIT16,WAIT32) else 0; cursor += size\nassert PATCH_LEVEL in seen and cursor == len(stream) - 5")' "$$task_tmp/loop-lane.afx" && \
 	$(BIN)/afx_profile export-lanes "$$task_tmp/lane.afx" "$$task_tmp/fixture.afx" "$$task_tmp/exported.afp" dry 0 && \
 	$(BIN)/afx_profile apply "$$task_tmp/fixture.afx" "$$task_tmp/fixture.afc" "$$task_tmp/exported.afp" \
 	"$$task_tmp/exported.afx" "$$task_tmp/exported.afc" && $(VALIDATOR) "$$task_tmp/exported.afx" && \

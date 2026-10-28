@@ -7,6 +7,13 @@ the commit history.
 
 ### Added
 
+- Looping songs: `afx_compile --loop-tick N`, `afx_c_compile_zones_loop()` and
+  `afx_c_compile_events_loop()` end the stream with AICAflow's `LOOP` back to
+  the instruction boundary at tick N, with `AFX_FLAG_LOOP` and `loop_tick` in
+  the header and the loop's joined burst in the work profile. `afx_profile
+  apply` carries the loop through its rewrite, and the research decoder reads
+  it. Needs the pinned AICAflow with `AFX_OP_LOOP` (firmware ABI 9). The CSeq
+  importer does not emit it yet.
 - `afx_n64 --sfx-adpcm` stores one-shot SFX samples as ADPCM at the source
   rate, at half the size of PCM8.
 

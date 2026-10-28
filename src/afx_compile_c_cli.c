@@ -99,14 +99,19 @@ failed:
 }
 
 int main(int argc, char **argv) {
-    uint32_t seconds = AFX_C_CHECKPOINT_SECONDS;
-    if (argc >= 3 && !strcmp(argv[argc - 2], "--checkpoint-seconds")) {
+    uint32_t seconds = AFX_C_CHECKPOINT_SECONDS, loop_tick = AFX_C_NO_LOOP;
+    /* Trailing options, in any order: --checkpoint-seconds N, --loop-tick N. */
+    for (int options = 0; options < 2 && argc >= 3; ++options) {
+        int checkpoint = !strcmp(argv[argc - 2], "--checkpoint-seconds");
+        if (!checkpoint && strcmp(argv[argc - 2], "--loop-tick")) break;
         char *end; errno = 0;
         unsigned long value = strtoul(argv[argc - 1], &end, 10);
         if (argv[argc - 1][0] < '0' || argv[argc - 1][0] > '9' || errno || *end ||
-            !value || value > UINT32_MAX)
-            return fprintf(stderr, "checkpoint seconds must be a positive 32-bit integer\n"), 2;
-        seconds = (uint32_t)value; argc -= 2;
+            (checkpoint ? !value || value > UINT32_MAX : value >= AFX_C_NO_LOOP))
+            return fprintf(stderr, "%s must be a %s 32-bit integer\n", argv[argc - 2],
+                           checkpoint ? "positive" : "non-negative"), 2;
+        if (checkpoint) seconds = (uint32_t)value; else loop_tick = (uint32_t)value;
+        argc -= 2;
     }
     if (argc == 4 && !strcmp(argv[1], "--seek")) {
         afx_c_output_t out = {0};
@@ -149,7 +154,8 @@ int main(int argc, char **argv) {
     int zones_mode = argc == 6 && !strcmp(argv[2], "--zones");
     int sf2_mode = argc == 7 && !strcmp(argv[2], "--sf2");
     if ((argc != 4 && argc != 5) && !zones_mode && !sf2_mode)
-        return fprintf(stderr, "Append --checkpoint-seconds N to set AFC spacing (default 10).\n"
+        return fprintf(stderr, "Append --checkpoint-seconds N to set AFC spacing (default 10), and\n"
+                       "--loop-tick N (an authored tick, 1000 per second) for a song that repeats from there.\n"
                        "usage: %s --seek flow.afx out.afc\n"
                        "       %s --visual flow.afx out.afv\n"
                        "       %s source.mid [sample.pcm] out.afb out.afx\n"
@@ -174,9 +180,10 @@ int main(int argc, char **argv) {
     if (!parsed && sf2_mode && (afx_c_parse_sample_format(argv[3], &sf2_options.sample_format) ||
                                 afx_c_sf2_resolve(argv[4], notes, count, &sf2_options, &sf2))) parsed = -1;
     int result = parsed || (argc == 5 && (!pcm || (pcm_bytes & 1))) ? -1 :
-                 sf2_mode ? afx_c_compile_zones(sf2.notes, sf2.note_count, 1000,
-                                                 sf2.zones, sf2.zone_count, &out) :
-                 zones_mode ? afx_c_compile_zones(notes, count, 1000, zones, zone_count, &out) :
+                 sf2_mode ? afx_c_compile_zones_loop(sf2.notes, sf2.note_count, 1000, loop_tick,
+                                                      sf2.zones, sf2.zone_count, &out) :
+                 zones_mode ? afx_c_compile_zones_loop(notes, count, 1000, loop_tick, zones, zone_count, &out) :
+                 loop_tick != AFX_C_NO_LOOP ? fprintf(stderr, "--loop-tick needs --zones or --sf2\n"), -1 :
                  argc == 5 ? afx_c_compile_sample(notes, count, 1000, &sample, &out) :
                  afx_c_compile_sine(notes, count, 1000, &out);
     free(notes);

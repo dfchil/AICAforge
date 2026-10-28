@@ -221,6 +221,36 @@ int main(void) {
         assert(notes_at[0] == 9 && notes_at[1] == 9 && notes_at[2] == 2 && keyoffs == 20 && tick == 30);
     }
     afx_c_output_free(&out);
+    /* A repeating flow ends with LOOP back to the instruction boundary at the
+       loop tick: inside a wait (5), on an event (10) and at the start (0). */
+    static const uint32_t loop_ticks[] = {5, 10, 0};
+    for (unsigned i = 0; i < 3; ++i) {
+        afx_file_header_t h;
+        afx_validation_profile_t work;
+        assert(!afx_c_compile_events_loop(trace_events, 3, 30, loop_ticks[i], 1000, trace_zone, 1, &out));
+        assert(afx_file_validate_profile(out.afx, out.afx_bytes, &h, &work) == AFX_OK);
+        assert((h.flags & AFX_FLAG_LOOP) && h.loop_tick == loop_ticks[i]);
+        assert(h.work_profile == AFX_WORK_PROFILE(work.peak_commands, work.peak_register_writes));
+        const uint8_t *stream = out.afx + h.image_offset + h.stream_offset;
+        assert(stream[h.stream_size - 5] == AFX_OP_LOOP);
+        uint32_t target = afx_read32(stream + h.stream_size - 4), cursor = 0, tick = 0;
+        while (cursor < target) {
+            afx_event_t event;
+            assert(afx_decode_event(stream + cursor, h.stream_size - cursor, &event) == AFX_OK);
+            if (event.opcode >= AFX_OP_WAIT8 && event.opcode <= AFX_OP_WAIT32) tick += event.wait;
+            cursor += event.bytes;
+        }
+        assert(cursor == target && tick == loop_ticks[i]);
+        assert(out.afc && out.afv); /* Still a song: seek and visual sidecars. */
+        afx_c_output_free(&out);
+    }
+    /* The loop tick must lie before the end, and a controlled flow cannot loop. */
+    assert(afx_c_compile_events_loop(trace_events, 3, 30, 30, 1000, trace_zone, 1, &out));
+    const afx_c_event_t parked[] = {trace_events[0], trace_events[1], trace_events[2],
+        {.tick = 30, .order = 1, .opcode = AFX_OP_PARK}};
+    assert(afx_c_compile_events_loop(parked, 4, 30, 0, 1000, trace_zone, 1, &out));
+    assert(!afx_c_compile_events(parked, 4, 30, 1000, trace_zone, 1, &out));
+    afx_c_output_free(&out);
     /* A release tail occupies its channel, but KEYOFF remains at the musical
        note end.  This is how the offline bank builder preserves an SF2
        release without inventing an ARM7-specific command. */
