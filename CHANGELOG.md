@@ -21,6 +21,10 @@ the commit history.
   the pinned AICAflow with those opcodes (format API 3, firmware ABI 10).
 - `afx_n64 --sfx-adpcm` stores one-shot SFX samples as ADPCM at the source
   rate, at half the size of PCM8.
+- `afx_c_simplify_events()` thins a recorded register trace before emission,
+  for importers that capture every change a driver made. A PATCH of pan or
+  level is dropped while it stays within a tolerance of the last value kept.
+  Lossy, and off unless an importer asks for it.
 
 ### Changed
 

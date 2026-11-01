@@ -697,6 +697,58 @@ static int compare_control_event(const void *left, const void *right) {
     return a->order < b->order ? -1 : a->order > b->order;
 }
 
+static int signed_pan(uint16_t direct) {
+    return direct & 0x10u ? -(int)(direct & 0x0Fu) : (int)(direct & 0x0Fu);
+}
+
+int afx_c_simplify_events(afx_c_event_t *events, uint32_t *count, const afx_c_simplify_t *options) {
+    /* Per channel: the DIRECT and MIX values the AICA holds, and whether they are known. */
+    uint16_t direct[AFX_MAX_FLOW_CHANNELS] = {0}, mix[AFX_MAX_FLOW_CHANNELS] = {0};
+    uint8_t known_direct[AFX_MAX_FLOW_CHANNELS] = {0}, known_mix[AFX_MAX_FLOW_CHANNELS] = {0};
+    uint32_t kept = 0;
+    if (!events || !count || !options) return -1;
+    qsort(events, *count, sizeof(*events), compare_control_event);
+    if (!options->pan_tolerance && !options->level_tolerance) return 0;
+    int before_loop = options->loop_tick != AFX_C_NO_LOOP;
+    for (uint32_t i = 0; i < *count; ++i) {
+        afx_c_event_t event = events[i];
+        uint8_t ch = event.channel;
+        if (ch >= AFX_MAX_FLOW_CHANNELS) return -1;
+        if (before_loop && event.tick >= options->loop_tick) {
+            memset(known_direct, 0, sizeof(known_direct));
+            memset(known_mix, 0, sizeof(known_mix));
+            before_loop = 0;
+        }
+        if (event.opcode == AFX_OP_NOTE) {
+            known_direct[ch] = (event.mask >> AFX_FIELD_DIRECT) & 1u;
+            known_mix[ch] = (event.mask >> AFX_FIELD_MIX) & 1u;
+            direct[ch] = event.fields[AFX_FIELD_DIRECT];
+            mix[ch] = event.fields[AFX_FIELD_MIX];
+        } else if (event.opcode == AFX_OP_PATCH) {
+            if (event.mask & (1u << AFX_FIELD_DIRECT)) {
+                uint16_t value = event.fields[AFX_FIELD_DIRECT];
+                int pan_step = abs(signed_pan(value) - signed_pan(direct[ch]));
+                if (known_direct[ch] && (value & ~0x1Fu) == (direct[ch] & ~0x1Fu) &&
+                    pan_step <= options->pan_tolerance)
+                    event.mask &= ~(1u << AFX_FIELD_DIRECT);
+                else { direct[ch] = value; known_direct[ch] = 1; }
+            }
+            if (event.mask & (1u << AFX_FIELD_MIX)) {
+                uint16_t value = event.fields[AFX_FIELD_MIX];
+                int level_step = abs((int)(value >> 8) - (int)(mix[ch] >> 8));
+                if (known_mix[ch] && (value & 0xFFu) == (mix[ch] & 0xFFu) && (value >> 8) != 0xFFu &&
+                    level_step <= options->level_tolerance)
+                    event.mask &= ~(1u << AFX_FIELD_MIX);
+                else { mix[ch] = value; known_mix[ch] = 1; }
+            }
+            if (!event.mask) continue;
+        }
+        events[kept++] = event;
+    }
+    *count = kept;
+    return 0;
+}
+
 static int compile_events(const afx_c_event_t *input, uint32_t count,
                           uint32_t duration_ticks, uint32_t loop_tick, uint32_t tick_rate,
                           const afx_c_zone_t *zones, uint32_t zone_count,

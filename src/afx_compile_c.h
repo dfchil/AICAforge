@@ -93,6 +93,27 @@ int afx_c_optimize_events(const afx_c_event_t *events, uint32_t count,
                           afx_c_event_t **out_events, afx_c_zone_t **out_zones,
                           uint32_t *out_zone_count);
 
+/* Lossy simplification of a register trace before emission, for importers that record every
+ * change a source driver made (a console recording, say). Within one channel, a PATCH value is
+ * dropped while it stays within a tolerance of the last value kept, so the AICA keeps a value at
+ * most that far from the source's:
+ * - `pan_tolerance`: DIRECT changes that only move pan (DIPAN, sign-magnitude) by at most this many
+ *   steps of 15 per side; changes of the other DIRECT bits are kept.
+ * - `level_tolerance`: MIX changes that only move attenuation (TL, the high byte, 0.375 dB steps)
+ *   by at most this many steps. A change to full attenuation (0xFF) is always kept.
+ * A NOTE sets a channel's state from its own values; a field it leaves to its setup template is
+ * unknown, so the next change of it is kept, as is every channel's first change from the loop
+ * tick on. A PATCH left with no fields is removed. Zero
+ * tolerances keep everything. `*count` is updated; events end up in (tick, order) order. */
+typedef struct {
+    uint8_t pan_tolerance;
+    uint8_t level_tolerance;
+    /* A looping flow's loop tick (AFX_C_NO_LOOP for none): playback reaches it a second time with
+     * the state the end of the flow left, so every channel's state is unknown again from there. */
+    uint32_t loop_tick;
+} afx_c_simplify_t;
+int afx_c_simplify_events(afx_c_event_t *events, uint32_t *count, const afx_c_simplify_t *options);
+
 /* Apply a source's explicit NOTE cluster policy before common emission.
  * `cluster_limit` is commands per control tick (1..38); note lifetimes move
  * together by whole ticks, so no timing is silently shortened. */

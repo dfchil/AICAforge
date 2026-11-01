@@ -432,5 +432,67 @@ int main(void) {
     assert(!afx_c_midi_notes(sustain_midi, sizeof(sustain_midi), 1000, &parsed, &count));
     assert(count == 1 && parsed[0].start_tick == 0 && parsed[0].end_tick == 104);
     free(parsed);
+    /* Lossy trace simplification: pan and level follow the source to within
+       the tolerance, measured from the last value kept. */
+    enum { DIRECT = 1u << AFX_FIELD_DIRECT, MIX = 1u << AFX_FIELD_MIX, PITCH = 1u << AFX_FIELD_PITCH };
+#define NOTE_EVENT(t, ch, m, dir, mx) {.tick = (t), .order = (t), .mask = (m), .opcode = AFX_OP_NOTE, .channel = (ch), \
+                                       .fields = {[AFX_FIELD_DIRECT] = (dir), [AFX_FIELD_MIX] = (mx)}}
+#define PATCH_EVENT(t, ch, m, dir, mx) {.tick = (t), .order = (t), .mask = (m), .opcode = AFX_OP_PATCH, .channel = (ch), \
+                                        .fields = {[AFX_FIELD_DIRECT] = (dir), [AFX_FIELD_MIX] = (mx)}}
+    const afx_c_simplify_t lossy = {.pan_tolerance = 2, .level_tolerance = 1, .loop_tick = AFX_C_NO_LOOP};
+    afx_c_event_t trace[] = {
+        NOTE_EVENT(0, 0, DIRECT | MIX, 0x0805, 0x4020),
+        PATCH_EVENT(2, 0, DIRECT, 0x0807, 0),         /* Two steps from 5: dropped. */
+        PATCH_EVENT(3, 0, DIRECT, 0x0808, 0),         /* Three from the 5 still held: kept. */
+        PATCH_EVENT(4, 0, DIRECT, 0x0818, 0),         /* +8 to -8 crosses centre: kept. */
+        PATCH_EVENT(5, 0, DIRECT, 0x0918, 0),         /* The same pan, another send level: kept. */
+        PATCH_EVENT(6, 0, MIX | PITCH, 0, 0x4120),    /* One step: the MIX goes, the pitch stays. */
+        PATCH_EVENT(7, 0, MIX, 0, 0x4220),            /* Two from 0x40: kept. */
+        PATCH_EVENT(8, 0, MIX, 0, 0x4221),            /* The same level, another Q: kept. */
+        PATCH_EVENT(9, 0, MIX, 0, 0xFE21),
+        PATCH_EVENT(10, 0, MIX, 0, 0xFF21),           /* One step, but to silence: kept. */
+        PATCH_EVENT(11, 1, DIRECT, 0x0805, 0),        /* Another channel: nothing known yet. */
+        NOTE_EVENT(12, 1, MIX, 0, 0x4020),            /* DIRECT left to the setup: unknown. */
+        PATCH_EVENT(13, 1, DIRECT, 0x0805, 0),
+        PATCH_EVENT(14, 1, MIX, 0, 0x4020),           /* The NOTE gave this one: dropped. */
+    };
+    const uint32_t expected_masks[] = {DIRECT | MIX, DIRECT, DIRECT, DIRECT, PITCH, MIX, MIX, MIX, MIX,
+                                       DIRECT, MIX, DIRECT};
+    const uint32_t expected_ticks[] = {0, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13};
+    count = sizeof(trace) / sizeof(*trace);
+    /* Input order does not matter. */
+    afx_c_event_t last = trace[count - 1];
+    trace[count - 1] = trace[0]; trace[0] = last;
+    assert(!afx_c_simplify_events(trace, &count, &lossy));
+    assert(count == sizeof(expected_masks) / sizeof(*expected_masks));
+    for (uint32_t i = 0; i < count; ++i)
+        assert(trace[i].mask == expected_masks[i] && trace[i].tick == expected_ticks[i]);
+    /* A loop returns to its tick with the state the end left. */
+    afx_c_event_t looped[] = {
+        NOTE_EVENT(0, 0, DIRECT, 0x0805, 0),
+        PATCH_EVENT(1, 0, DIRECT, 0x0806, 0),
+        PATCH_EVENT(10, 0, DIRECT, 0x0806, 0),        /* The first change from the loop on: kept. */
+        PATCH_EVENT(11, 0, DIRECT, 0x0807, 0),
+    };
+    afx_c_simplify_t loop_options = lossy;
+    loop_options.loop_tick = 10;
+    count = sizeof(looped) / sizeof(*looped);
+    assert(!afx_c_simplify_events(looped, &count, &loop_options));
+    assert(count == 2 && looped[1].tick == 10);
+    /* Zero tolerances keep every event, and still sort. */
+    afx_c_event_t unsorted[] = {PATCH_EVENT(5, 0, DIRECT, 0x0805, 0), PATCH_EVENT(1, 0, DIRECT, 0x0805, 0)};
+    const afx_c_simplify_t lossless = {.loop_tick = AFX_C_NO_LOOP};
+    count = 2;
+    assert(!afx_c_simplify_events(unsorted, &count, &lossless));
+    assert(count == 2 && unsorted[0].tick == 1 && unsorted[1].tick == 5);
+    /* Bad input is refused. */
+    afx_c_event_t stray[] = {PATCH_EVENT(0, AFX_MAX_FLOW_CHANNELS, DIRECT, 0x0805, 0)};
+    count = 1;
+    assert(afx_c_simplify_events(stray, &count, &lossy) == -1);
+    assert(afx_c_simplify_events(NULL, &count, &lossy) == -1);
+    assert(afx_c_simplify_events(stray, NULL, &lossy) == -1);
+    assert(afx_c_simplify_events(stray, &count, NULL) == -1);
+#undef NOTE_EVENT
+#undef PATCH_EVENT
     return 0;
 }
