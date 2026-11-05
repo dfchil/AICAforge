@@ -7,6 +7,15 @@ the commit history.
 
 ### Added
 
+- `afx_bank --merge --shared core.afb` (up to three shared banks): a sample
+  whose bytes a shared bank already holds, at a 32-byte boundary, plays from
+  that bank instead of being copied into the merged bank. A flow that then
+  plays from more than one bank gets AICAflow's `AFX_FLAG_BANKS`: the bank
+  slot in its sample addresses, the shared banks' identities in its bank list
+  and a bank table after its stream. A flow whose samples all lie in one bank
+  binds that bank as before, and the merged bank is not written when every
+  sample is shared. AFC sidecars move with their setups. Needs the pinned
+  AICAflow with `AFX_FLAG_BANKS` (format API 4, firmware ABI 13).
 - Looping songs: `afx_compile --loop-tick N`, `afx_c_compile_zones_loop()` and
   `afx_c_compile_events_loop()` end the stream with AICAflow's `LOOP` back to
   the instruction boundary at tick N, with `AFX_FLAG_LOOP` and `loop_tick` in

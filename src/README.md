@@ -37,6 +37,8 @@ build/afx_bank library.afbm output music.afb
 build/afx_bank --per-song library.afbm output
 # Combine authored AFB/AFX pairs into one bank:
 build/afx_bank --merge music.afb controls raw/sequence_*.afx
+# The same, leaving out samples a resident core bank already holds:
+build/afx_bank --merge --shared core.afb scene.afb controls raw/level_*.afx
 ```
 
 AFBM selects SF2 sources, presets, coding, rates and register-lowering policy.

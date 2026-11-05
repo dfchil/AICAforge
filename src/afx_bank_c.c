@@ -592,13 +592,19 @@ failed:
     fprintf(stderr, "cannot build per-song banks from %s\n", map_path); return 1;
 }
 
-/* Merge final AFB+AFX pairs into one bank.  This is deliberately an authoring
- * operation: runtime still sees its one-bank-per-flow ABI. */
+/* Merge final AFB+AFX pairs into one bank.  With --shared, a sample whose
+ * bytes a shared bank already holds stays there instead: the flow plays it
+ * from that bank's slot (AFX_FLAG_BANKS) and the merged bank omits it. */
 typedef struct {
     const uint8_t *data;
     uint32_t bytes, offset;
     uint8_t format;
+    uint8_t bank; /* 0 for the merged bank, n for the n-th shared bank. */
 } merge_sample_t;
+typedef struct {
+    uint8_t *afb;
+    uint32_t afb_bytes, low, high;
+} shared_bank_t;
 typedef struct {
     const char *path;
     uint8_t *afx, *afb, *afc;
@@ -679,7 +685,7 @@ static int merge_sample_for(const uint8_t *data, uint32_t bytes, uint8_t format,
     }
     /* These are final samples: merging must preserve the author's coding,
      * quality gate and loop representation, not choose a new encoding. */
-    (*samples)[*count] = (merge_sample_t){data, bytes, 0, format};
+    (*samples)[*count] = (merge_sample_t){data, bytes, 0, format, 0};
     *out = (*count)++;
     return 0;
 }
@@ -708,7 +714,7 @@ static int collect_merge_samples(merge_flow_t *flows, uint32_t flow_count,
     *out_samples = samples; *out_count = count; return 0;
 }
 
-static int rewrite_seek(merge_flow_t *flow, const merge_sample_t *samples,
+static int rewrite_seek(merge_flow_t *flow, const merge_sample_t *samples, const uint8_t *slot_for_bank,
                         uint32_t bank_low, uint32_t bank_high, uint32_t control_id,
                         uint8_t **out, uint32_t *out_bytes) {
     uint8_t *data = malloc(flow->afc_bytes);
@@ -735,7 +741,8 @@ static int rewrite_seek(merge_flow_t *flow, const merge_sample_t *samples,
                 if (setup == flow->header.setup_count) goto failed;
                 const merge_sample_t *sample = samples + flow->sample_for_setup[setup];
                 uint32_t address = sample->offset + old - afx_read32(flow->afx + flow->header.relocations_offset + setup * 12u + 4u);
-                if (address > 0x7fffffu) goto failed;
+                if (address > AFX_BANK_SLOT_OFFSET_MASK) goto failed;
+                address |= (uint32_t)slot_for_bank[sample->bank] << AFX_BANK_SLOT_SHIFT;
                 afx_write16(data + cursor + 4, (uint16_t)((control & ~0x1ffu) | ((uint16_t)sample->format << 7) | (address >> 16)));
                 afx_write16(data + cursor + 6, (uint16_t)address);
             }
@@ -749,9 +756,72 @@ failed:
     free(data); return -1;
 }
 
-static int merge_final_banks(const char *bank_path, const char *controls_dir, int argc, char **argv) {
+static int read_shared_bank(const char *path, shared_bank_t *bank) {
+    if (read_file(path, &bank->afb, &bank->afb_bytes) || bank->afb_bytes < AFX_BANK_HEADER_BYTES ||
+        afx_read32(bank->afb) != AFX_BANK_MAGIC || afx_read32(bank->afb + 4) != AFX_BANK_VERSION ||
+        afx_read32(bank->afb + 16) != AFX_BANK_HEADER_BYTES || afx_read32(bank->afb + 24) != bank->afb_bytes ||
+        afx_read32(bank->afb + 20) != bank->afb_bytes - AFX_BANK_HEADER_BYTES) return -1;
+    bank->low = afx_read32(bank->afb + 8); bank->high = afx_read32(bank->afb + 12);
+    return bank->low || bank->high ? 0 : -1;
+}
+
+/* The first shared bank that holds a sample's bytes at a 32-byte boundary,
+ * where an authored bank places its samples. */
+static void find_shared(merge_sample_t *sample, const shared_bank_t *shared, uint32_t shared_count) {
+    for (uint32_t n = 0; n < shared_count; ++n) {
+        const uint8_t *payload = shared[n].afb + AFX_BANK_HEADER_BYTES;
+        uint32_t bytes = shared[n].afb_bytes - AFX_BANK_HEADER_BYTES;
+        for (uint32_t at = 0; sample->bytes <= bytes && at <= bytes - sample->bytes; at += 32u)
+            if (!memcmp(payload + at, sample->data, sample->bytes)) {
+                sample->bank = (uint8_t)(n + 1u); sample->offset = at; return;
+            }
+    }
+}
+
+/* A flow whose samples lie in more than one bank is rebuilt with
+ * AFX_FLAG_BANKS: relocations, the bank list, then the image with the bank
+ * table after its stream. Otherwise the layout is kept. Either way the header
+ * binds slot 0's bank. */
+static uint8_t *rebuild_flow(const merge_flow_t *flow, uint32_t (*identity)[2], uint32_t slots,
+                             uint32_t *out_bytes, afx_file_header_t *out_header) {
+    const afx_file_header_t *h = &flow->header;
+    afx_file_header_t header = *h;
+    header.bank_id_low = identity[0][0]; header.bank_id_high = identity[0][1];
+    if (slots < 2) {
+        uint8_t *copy = malloc(flow->afx_bytes);
+        if (!copy) return NULL;
+        memcpy(copy, flow->afx, flow->afx_bytes);
+        afx_encode_header(copy, &header);
+        *out_bytes = flow->afx_bytes; *out_header = header;
+        return copy;
+    }
+    uint32_t list = AFX_FILE_HEADER_BYTES + h->relocation_count * 12u;
+    uint32_t image = align32(list + 4u + 8u * (slots - 1u));
+    uint32_t table = AFX_BANK_TABLE_OFFSET(h->stream_offset + h->stream_size);
+    if (h->image_size != h->stream_offset + h->stream_size) return NULL;
+    uint32_t bytes = image + table + AFX_BANK_TABLE_BYTES;
+    uint8_t *out = calloc(1, bytes);
+    if (!out) return NULL;
+    header.flags |= AFX_FLAG_BANKS; header.total_size = bytes;
+    header.relocations_offset = AFX_FILE_HEADER_BYTES; header.banks_offset = list;
+    header.image_offset = image; header.image_size = table + AFX_BANK_TABLE_BYTES;
+    afx_encode_header(out, &header);
+    memcpy(out + AFX_FILE_HEADER_BYTES, flow->afx + h->relocations_offset, h->relocation_count * 12u);
+    afx_write32(out + list, slots - 1u);
+    for (uint32_t slot = 1; slot < slots; ++slot) {
+        afx_write32(out + list + slot * 8u - 4u, identity[slot][0]);
+        afx_write32(out + list + slot * 8u, identity[slot][1]);
+    }
+    memcpy(out + image, flow->afx + h->image_offset, h->image_size);
+    *out_bytes = bytes; *out_header = header;
+    return out;
+}
+
+static int merge_final_banks(const char *bank_path, const char *controls_dir, int argc, char **argv,
+                             const shared_bank_t *shared, uint32_t shared_count) {
     merge_flow_t *flows = calloc((size_t)argc, sizeof(*flows));
     merge_sample_t *samples = NULL; uint8_t *bank = NULL; uint32_t flow_count = (uint32_t)argc, sample_count = 0, payload = 0;
+    uint32_t shared_samples = 0;
     int result = 1;
     if (!flows) goto done;
     for (uint32_t i = 0; i < flow_count; ++i) {
@@ -760,44 +830,68 @@ static int merge_final_banks(const char *bank_path, const char *controls_dir, in
     }
     if (collect_merge_samples(flows, flow_count, &samples, &sample_count)) goto done;
     for (uint32_t i = 0; i < sample_count; ++i) {
+        find_shared(samples + i, shared, shared_count);
+        if (samples[i].bank) { ++shared_samples; continue; }
         payload = align32(payload);
         if (samples[i].bytes > AFX_TARGET_MAX_BANK_BYTES - payload) goto done;
         samples[i].offset = payload; payload += samples[i].bytes;
     }
-    if (!payload || payload > AFX_TARGET_MAX_BANK_BYTES || payload > UINT32_MAX - AFX_BANK_HEADER_BYTES) goto done;
-    bank = calloc(1, AFX_BANK_HEADER_BYTES + payload);
-    if (!bank) goto done;
-    for (uint32_t i = 0; i < sample_count; ++i) memcpy(bank + AFX_BANK_HEADER_BYTES + samples[i].offset, samples[i].data, samples[i].bytes);
-    uint32_t bank_low = merge_hash(bank + AFX_BANK_HEADER_BYTES, payload, 2166136261u);
-    uint32_t bank_high = merge_hash(bank + AFX_BANK_HEADER_BYTES, payload, 2166136261u ^ 0x9e3779b9u);
-    afx_write32(bank, AFX_BANK_MAGIC); afx_write32(bank + 4, AFX_BANK_VERSION); afx_write32(bank + 8, bank_low); afx_write32(bank + 12, bank_high);
-    afx_write32(bank + 16, AFX_BANK_HEADER_BYTES); afx_write32(bank + 20, payload); afx_write32(bank + 24, AFX_BANK_HEADER_BYTES + payload);
-    if (write_file(bank_path, bank, AFX_BANK_HEADER_BYTES + payload)) goto done;
+    if (payload > AFX_TARGET_MAX_BANK_BYTES || payload > UINT32_MAX - AFX_BANK_HEADER_BYTES ||
+        (!payload && !shared_samples)) goto done;
+    /* identity[0] is the merged bank, identity[n] the n-th shared bank. */
+    uint32_t identity[4][2] = {{0, 0}};
+    for (uint32_t n = 0; n < shared_count; ++n) { identity[n + 1u][0] = shared[n].low; identity[n + 1u][1] = shared[n].high; }
+    if (payload) {
+        bank = calloc(1, AFX_BANK_HEADER_BYTES + payload);
+        if (!bank) goto done;
+        for (uint32_t i = 0; i < sample_count; ++i)
+            if (!samples[i].bank) memcpy(bank + AFX_BANK_HEADER_BYTES + samples[i].offset, samples[i].data, samples[i].bytes);
+        identity[0][0] = merge_hash(bank + AFX_BANK_HEADER_BYTES, payload, 2166136261u);
+        identity[0][1] = merge_hash(bank + AFX_BANK_HEADER_BYTES, payload, 2166136261u ^ 0x9e3779b9u);
+        afx_write32(bank, AFX_BANK_MAGIC); afx_write32(bank + 4, AFX_BANK_VERSION);
+        afx_write32(bank + 8, identity[0][0]); afx_write32(bank + 12, identity[0][1]);
+        afx_write32(bank + 16, AFX_BANK_HEADER_BYTES); afx_write32(bank + 20, payload); afx_write32(bank + 24, AFX_BANK_HEADER_BYTES + payload);
+        if (write_file(bank_path, bank, AFX_BANK_HEADER_BYTES + payload)) goto done;
+    }
     for (uint32_t i = 0; i < flow_count; ++i) {
-        merge_flow_t *flow = flows + i; uint8_t *rewritten = malloc(flow->afx_bytes), *seek = NULL; uint32_t seek_bytes = 0;
+        merge_flow_t *flow = flows + i; uint8_t *rewritten = NULL, *seek = NULL; uint32_t bytes = 0, seek_bytes = 0;
         char afx_path[4096], afc_path[4096];
-        if (!rewritten || merged_path(controls_dir, flow->path, afx_path) || sibling_path(afx_path, ".afc", afc_path)) { free(rewritten); goto done; }
-        memcpy(rewritten, flow->afx, flow->afx_bytes);
-        for (uint32_t setup = 0; setup < flow->header.setup_count; ++setup) {
-            uint8_t *state = rewritten + flow->header.image_offset + setup * AFX_SETUP_BYTES;
-            uint8_t *relocation = rewritten + flow->header.relocations_offset + setup * 12u;
+        /* The banks this flow plays from, the merged one first: its slots. */
+        uint8_t used[4] = {0}, slot_for_bank[4] = {0};
+        uint32_t slot_identity[4][2] = {{0, 0}}, slots = 0;
+        for (uint32_t setup = 0; setup < flow->header.setup_count; ++setup) used[samples[flow->sample_for_setup[setup]].bank] = 1;
+        if (!flow->header.setup_count) used[0] = payload != 0;
+        for (uint32_t n = 0; n <= shared_count; ++n)
+            if (used[n]) {
+                slot_for_bank[n] = (uint8_t)slots;
+                slot_identity[slots][0] = identity[n][0]; slot_identity[slots][1] = identity[n][1]; ++slots;
+            }
+        afx_file_header_t header;
+        if (merged_path(controls_dir, flow->path, afx_path) || sibling_path(afx_path, ".afc", afc_path) ||
+            !(rewritten = rebuild_flow(flow, slot_identity, slots, &bytes, &header))) goto done;
+        for (uint32_t setup = 0; setup < header.setup_count; ++setup) {
+            uint8_t *state = rewritten + header.image_offset + setup * AFX_SETUP_BYTES;
+            uint8_t *relocation = rewritten + header.relocations_offset + setup * 12u;
             const merge_sample_t *sample = samples + flow->sample_for_setup[setup]; uint16_t control = afx_read16(state);
-            if (sample->offset > 0x7fffffu) { free(rewritten); goto done; }
-            afx_write16(state, (uint16_t)((control & ~0x1ffu) | ((uint16_t)sample->format << 7) | (sample->offset >> 16)));
-            afx_write16(state + 2, (uint16_t)sample->offset); afx_write32(relocation + 4, sample->offset); afx_write32(relocation + 8, sample->bytes);
+            if (sample->offset > AFX_BANK_SLOT_OFFSET_MASK) { free(rewritten); goto done; }
+            uint32_t address = sample->offset | (uint32_t)slot_for_bank[sample->bank] << AFX_BANK_SLOT_SHIFT;
+            afx_write16(state, (uint16_t)((control & ~0x1ffu) | ((uint16_t)sample->format << 7) | (address >> 16)));
+            afx_write16(state + 2, (uint16_t)address); afx_write32(relocation + 4, address); afx_write32(relocation + 8, sample->bytes);
         }
-        afx_write32(rewritten + 40, bank_low); afx_write32(rewritten + 44, bank_high);
-        uint32_t control_id = afx_control_id(rewritten + flow->header.image_offset, flow->header.image_size);
+        uint32_t control_id = afx_control_id(rewritten + header.image_offset, header.image_size);
         afx_write32(rewritten + 32, control_id);
-        if (afx_c_set_work_profile(rewritten, flow->afx_bytes) ||
-            (flow->afc && rewrite_seek(flow, samples, bank_low, bank_high, control_id, &seek, &seek_bytes)) ||
-            write_file(afx_path, rewritten, flow->afx_bytes) ||
+        if (afx_c_set_work_profile(rewritten, bytes) ||
+            (flow->afc && rewrite_seek(flow, samples, slot_for_bank, slot_identity[0][0], slot_identity[0][1],
+                                       control_id, &seek, &seek_bytes)) ||
+            write_file(afx_path, rewritten, bytes) ||
             (flow->afc && write_file(afc_path, seek, seek_bytes))) {
             free(rewritten); free(seek); goto done;
         }
         free(rewritten); free(seek);
     }
-    printf("merged %u flows and %u samples into %s (%u bytes)\n", flow_count, sample_count, bank_path, payload);
+    if (payload) printf("merged %u flows and %u samples into %s (%u bytes)\n", flow_count, sample_count - shared_samples, bank_path, payload);
+    else printf("merged %u flows; every sample is in a shared bank, so %s was not written\n", flow_count, bank_path);
+    if (shared_count) printf("%u samples play from shared banks\n", shared_samples);
     result = 0;
 done:
     if (result) fprintf(stderr, "cannot merge final AFB/AFX inputs\n");
@@ -811,11 +905,28 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (argc == 4 && !strcmp(argv[1], "--per-song")) return build_per_song(argv[2], argv[3]);
-    if (argc >= 5 && !strcmp(argv[1], "--merge")) return merge_final_banks(argv[2], argv[3], argc - 4, argv + 4);
+    if (argc >= 2 && !strcmp(argv[1], "--merge")) {
+        shared_bank_t shared[AFX_MAX_FLOW_BANKS - 1u] = {0};
+        uint32_t shared_count = 0;
+        int next = 2, result = 2;
+        while (next + 1 < argc && !strcmp(argv[next], "--shared") && shared_count < AFX_MAX_FLOW_BANKS - 1u) {
+            if (read_shared_bank(argv[next + 1], shared + shared_count++)) {
+                fprintf(stderr, "cannot read shared bank %s\n", argv[next + 1]); goto merged;
+            }
+            next += 2;
+        }
+        if (argc - next >= 3 && strcmp(argv[next], "--shared"))
+            result = merge_final_banks(argv[next], argv[next + 1], argc - next - 2, argv + next + 2, shared, shared_count);
+        else fprintf(stderr, "usage: %s --merge [--shared core.afb ...] bank.afb controls-dir flow.afx [flow.afx ...]\n"
+                     "       (at most %u shared banks)\n", argv[0], AFX_MAX_FLOW_BANKS - 1u);
+merged:
+        for (uint32_t n = 0; n < shared_count; ++n) free(shared[n].afb);
+        return result;
+    }
     if (argc != 4) return fprintf(stderr,
         "usage: %s library.afbm output-dir bank.afb\n"
         "       %s --per-song library.afbm output-dir\n"
-        "       %s --merge bank.afb controls-dir flow.afx [flow.afx ...]\n", argv[0], argv[0], argv[0]), 2;
+        "       %s --merge [--shared core.afb ...] bank.afb controls-dir flow.afx [flow.afx ...]\n", argv[0], argv[0], argv[0]), 2;
     source_t *sources = NULL; map_t *maps = NULL; song_t *songs = NULL;
     uint32_t source_count = 0, map_count = 0, song_count = 0, zone_count = 0;
     afx_c_zone_t *zones = NULL;

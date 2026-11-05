@@ -283,8 +283,24 @@ Each input AFX needs its sibling AFB; an optional sibling AFC is relocated
 along with it. Merging preserves sample bytes, coding and playback parameters,
 deduplicates equal samples and rewrites bindings. It does not re-encode for
 `auto`, merge AFV playlists or emit AFI. Several outputs can then use one
-resident music bank; scene-specific SFX banks use the same one-bank-per-flow
-contract.
+resident music bank.
+
+To keep samples that a resident bank already holds out of a scene's bank, name
+that bank with `--shared` (up to three):
+
+```sh
+build/afx_bank --merge --shared core.afb scene.afb controls raw/level_*.afx
+```
+
+A sample whose exact bytes lie in a shared bank, at a 32-byte boundary, stays
+there; `scene.afb` holds only the rest. A flow that plays from more than one
+bank gets AICAflow's `AFX_FLAG_BANKS`. Its slots are the banks it uses, in this
+order: `scene.afb`, then the shared banks in `--shared` order. Upload it with
+`afx_flow_upload()` and those banks; `afx_file_bank_identity()` names each slot (see
+AICAflow's [Several banks](https://github.com/dfchil/AICAflow/blob/main/driver/format/docs/assets.md#several-banks)).
+A flow whose samples all lie in one bank binds that bank alone. When every
+sample is shared, `scene.afb` is not written. Such flows need AICAflow
+firmware ABI 13.
 
 ## MultiPCM VGM/VGZ
 
