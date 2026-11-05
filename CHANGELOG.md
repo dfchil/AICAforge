@@ -7,6 +7,14 @@ the commit history.
 
 ### Added
 
+- `afx_scene manifest.afsm` plans AICAflow AFS scene files: the banks, flows,
+  slots and DSP ring of each scene with their places in the scene's AICA
+  block, laid out with the runtime's rounding and checked with the loader's
+  `afx_scene_validate()`. It reports each scene's bytes and the headroom of
+  the permanent scene plus each level (plus the two largest levels when
+  transitions overlap), checks that every flow finds its banks in its scene or
+  the permanent one, and writes nothing and exits non-zero when something does
+  not fit. Needs the pinned AICAflow with AFS (format API 5).
 - `afx_bank --merge --shared core.afb` (up to three shared banks): a sample
   whose bytes a shared bank already holds, at a 32-byte boundary, plays from
   that bank instead of being copied into the merged bank. A flow that then

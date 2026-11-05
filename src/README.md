@@ -46,6 +46,13 @@ Map builds emit compact and named AFI catalogs. Merge preserves encoded sample
 bytes and relocates each AFX and optional AFC; it emits no AFI or AFV.
 Standalone PCM uses `afx_compile --zones`, not AFBM.
 
+## Scenes
+
+```sh
+# AFS scene files from a manifest, with a fit report; non-zero when they do not fit:
+build/afx_scene game.afsm
+```
+
 ## Performance profiles
 
 ```sh
