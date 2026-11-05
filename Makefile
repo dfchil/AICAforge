@@ -22,8 +22,9 @@ BANK_COMPILER := $(BUILD)/afx_bank
 PROFILE_COMPILER := $(BUILD)/afx_profile
 VGM_COMPILER := $(BUILD)/afx_vgm
 N64_COMPILER := $(BUILD)/afx_n64
+SCENE_TOOL := $(BUILD)/afx_scene
 
-all: $(C_COMPILER) $(DEMO_ASSETS) $(BANK_COMPILER) $(PROFILE_COMPILER) $(VGM_COMPILER) $(N64_COMPILER)
+all: $(C_COMPILER) $(DEMO_ASSETS) $(BANK_COMPILER) $(PROFILE_COMPILER) $(VGM_COMPILER) $(N64_COMPILER) $(SCENE_TOOL)
 
 check: all $(C_COMPILER_TEST) $(N64_CSEQ_TEST) $(N64_SFX_TEST)
 	$(MAKE) -C $(FORMAT) check
@@ -69,7 +70,11 @@ $(N64_COMPILER): $(SRC)/afx_n64.c $(SRC)/afx_n64_cseq.c $(SRC)/afx_n64_cseq.h $(
 	mkdir -p "$(BUILD)"
 	$(CC) $(CFLAGS) -I$(FORMAT)/include -I$(SRC) $(SRC)/afx_n64.c $(SRC)/afx_n64_cseq.c $(SRC)/afx_compile_c.c $(SRC)/afx_sample_c.c $(SRC)/afx_ya2beam.c $(FORMAT)/src/codec.c -lm -o $@
 
-$(C_COMPILER) $(C_COMPILER_TEST) $(N64_CSEQ_TEST) $(N64_SFX_TEST) $(DEMO_ASSETS) $(BANK_COMPILER) $(PROFILE_COMPILER) $(VGM_COMPILER) $(N64_COMPILER): $(wildcard $(FORMAT)/include/aicaflow/*.h)
+$(SCENE_TOOL): $(SRC)/afx_scene.c $(FORMAT)/src/codec.c $(FORMAT)/include/aicaflow/codec.h $(FORMAT)/include/aicaflow/format.h
+	mkdir -p "$(BUILD)"
+	$(CC) $(CFLAGS) -I$(FORMAT)/include $(SRC)/afx_scene.c $(FORMAT)/src/codec.c -o $@
+
+$(C_COMPILER) $(C_COMPILER_TEST) $(N64_CSEQ_TEST) $(N64_SFX_TEST) $(DEMO_ASSETS) $(BANK_COMPILER) $(PROFILE_COMPILER) $(VGM_COMPILER) $(N64_COMPILER) $(SCENE_TOOL): $(wildcard $(FORMAT)/include/aicaflow/*.h)
 
 .PHONY: all check
 

@@ -37,12 +37,21 @@ build/afx_bank library.afbm output music.afb
 build/afx_bank --per-song library.afbm output
 # Combine authored AFB/AFX pairs into one bank:
 build/afx_bank --merge music.afb controls raw/sequence_*.afx
+# The same, leaving out samples a resident core bank already holds:
+build/afx_bank --merge --shared core.afb scene.afb controls raw/level_*.afx
 ```
 
 AFBM selects SF2 sources, presets, coding, rates and register-lowering policy.
 Map builds emit compact and named AFI catalogs. Merge preserves encoded sample
 bytes and relocates each AFX and optional AFC; it emits no AFI or AFV.
 Standalone PCM uses `afx_compile --zones`, not AFBM.
+
+## Scenes
+
+```sh
+# AFS scene files from a manifest, with a fit report; non-zero when they do not fit:
+build/afx_scene game.afsm
+```
 
 ## Performance profiles
 

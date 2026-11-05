@@ -283,8 +283,65 @@ Each input AFX needs its sibling AFB; an optional sibling AFC is relocated
 along with it. Merging preserves sample bytes, coding and playback parameters,
 deduplicates equal samples and rewrites bindings. It does not re-encode for
 `auto`, merge AFV playlists or emit AFI. Several outputs can then use one
-resident music bank; scene-specific SFX banks use the same one-bank-per-flow
-contract.
+resident music bank.
+
+To keep samples that a resident bank already holds out of a scene's bank, name
+that bank with `--shared` (up to three):
+
+```sh
+build/afx_bank --merge --shared core.afb scene.afb controls raw/level_*.afx
+```
+
+A sample whose exact bytes lie in a shared bank, at a 32-byte boundary, stays
+there; `scene.afb` holds only the rest. A flow that plays from more than one
+bank gets AICAflow's `AFX_FLAG_BANKS`. Its slots are the banks it uses, in this
+order: `scene.afb`, then the shared banks in `--shared` order. Upload it with
+`afx_flow_upload()` and those banks; `afx_file_bank_identity()` names each slot (see
+AICAflow's [Several banks](https://github.com/dfchil/AICAflow/blob/main/driver/format/docs/assets.md#several-banks)).
+A flow whose samples all lie in one bank binds that bank alone. When every
+sample is shared, `scene.afb` is not written. Such flows need AICAflow
+firmware ABI 13.
+
+## Scenes and the fit check
+
+`afx_scene` turns a manifest of scenes into AICAflow AFS files, each holding
+the banks and flows of one scene and where each goes in the one AICA block the
+loader allocates for it. It also checks that the permanent scene and each
+level scene fit the arena together:
+
+```sh
+build/afx_scene game.afsm
+```
+
+```text
+# Paths are relative to this file; entries belong to the scene above them.
+firmware ../dependencies/AICAflow/firmware/aicaflow.drv
+overlap                      # the next level loads before the last is released
+permanent core out/core.afs
+  bank core core.afb
+  flow jingle jingle.afx
+  ring 3                     # the DSP delay ring, 16 KiB << RBL
+level forest out/forest.afs
+  bank forest forest.afb
+  flow theme controls/theme.afx
+  slot song 131072           # bytes for a bank and a flow loaded later
+```
+
+- A flow's bank slots must find their banks by identity in its scene or, for
+  a level, in the permanent scene; `afx_bank --merge --shared core.afb` makes
+  such flows. The program passes the permanent scene as the level's parent.
+- Each block is laid out with the runtime's rounding: the ring first, on a
+  2 KiB boundary, then each entry at 32 bytes in manifest order. The files are
+  checked with the loader's own `afx_scene_validate()`.
+- The arena runs from the firmware image's size, rounded up to 32 bytes, to
+  the asset ceiling. The report gives each scene's bytes and the headroom of
+  the permanent scene plus each level, plus the two largest levels with
+  `overlap`. A level is charged the padding its alignment may cost.
+- When something does not fit, or the loader would refuse a scene, the tool
+  writes nothing and exits non-zero.
+
+Load the files with `afx_scene_load()` (AICAflow's
+[Scenes](https://github.com/dfchil/AICAflow/blob/main/docs/integration.md#scenes)).
 
 ## MultiPCM VGM/VGZ
 
@@ -325,6 +382,8 @@ Budget the assets that will be resident together, not the total files on disk:
   a lower `rate`, or PCM8/`auto`. Shorter `loop_ms` trades sustain detail for space.
 - Use `--per-song` when only one song is resident. Use a shared bank or merge
   when several flows need the same samples together.
+- `afx_scene` totals the scenes that are resident together and fails the
+  build when they do not fit.
 - Release tails keep channels occupied after KEYOFF. If voice allocation fails,
   reduce overlapping notes, stereo layers or the authored release-tail reservation.
 - One tick holds at most 38 commands and 171 register writes (nine full
