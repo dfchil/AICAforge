@@ -37,6 +37,12 @@ the commit history.
 
 ### Fixed
 
+- `afx_c_optimize_events()` sized its template array by the zone count, but a
+  zone gets a template for each setup variant used often enough, so a source
+  with more variants than zones wrote past the array. SM64's songs reach 65
+  templates from 13 zones. The array is now sized by the variant count.
+  Output is unchanged wherever the old size was enough (DKR's 64 songs: never
+  more templates than zones).
 - SoundFont zones without a `sampleModes` generator are one-shots. They were
   looped whenever the sample header carried loop points. This changes the
   output for fonts that relied on it, including the Grieg song in AICAflow's

@@ -192,6 +192,30 @@ int main(void) {
     assert(out.afx[trace_image + AFX_SETUP_BYTES] == AFX_OP_NOTE_PL &&
            out.afx[trace_image + AFX_SETUP_BYTES + 10] == AFX_OP_PATCH_LEVEL);
     afx_c_output_free(&out);
+    /* One zone can yield several setups: each envelope used often enough
+       gets a template of its own, so there are more templates than zones. */
+    afx_c_event_t variant_notes[24];
+    for (unsigned i = 0; i < 24; ++i)
+        variant_notes[i] = (afx_c_event_t){.tick = 2 * i, .order = 0, .opcode = AFX_OP_NOTE, .channel = 0,
+            .mask = AFX_NOTE_PL_MASK | 1u << AFX_FIELD_ENV_AD,
+            .fields = {[AFX_FIELD_PITCH] = 0x0800, [AFX_FIELD_MIX] = 0x3024,
+                       [AFX_FIELD_ENV_AD] = (uint16_t)(0x0010 + i % 3)}};
+    afx_c_event_t *variant_events = NULL;
+    afx_c_zone_t *variant_setups = NULL;
+    uint32_t variant_setup_count = 0;
+    assert(!afx_c_optimize_events(variant_notes, 24, trace_zone, 1, &variant_events, &variant_setups,
+                                  &variant_setup_count));
+    assert(variant_setup_count == 3);
+    for (unsigned i = 0; i < 24; ++i) {
+        const afx_c_event_t *note = &variant_events[i];
+        assert(!(note->mask & 1u << AFX_FIELD_ENV_AD) &&
+               variant_setups[note->setup].setup[AFX_FIELD_ENV_AD] == variant_notes[i].fields[AFX_FIELD_ENV_AD]);
+    }
+    assert(!afx_c_compile_events(variant_events, 24, 50, 1000, variant_setups, variant_setup_count, &out));
+    assert(afx_file_validate(out.afx, out.afx_bytes, NULL) == AFX_OK);
+    afx_c_output_free(&out);
+    free(variant_events);
+    free(variant_setups);
     /* Twenty notes on one tick are 380 register writes. The emitter keeps
        their order and moves what does not fit into the following ticks. */
     afx_c_event_t burst[40];

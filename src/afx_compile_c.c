@@ -202,9 +202,8 @@ int afx_c_optimize_events(const afx_c_event_t *input, uint32_t event_count,
     if (!input || !event_count || !zones || !zone_count || zone_count > UINT16_MAX ||
         !out_events || !out_zones || !out_zone_count) return -1;
     events = malloc(event_count * sizeof(*events));
-    templates = malloc(zone_count * sizeof(*templates));
     variants = calloc(event_count, sizeof(*variants));
-    if (!events || !templates || !variants) goto failed;
+    if (!events || !variants) goto failed;
     for (uint32_t event = 0; event < event_count; ++event) {
         const afx_c_event_t *source = input + event;
         if (source->opcode != AFX_OP_NOTE) continue;
@@ -219,6 +218,9 @@ int afx_c_optimize_events(const afx_c_event_t *input, uint32_t event_count,
         else ++variants[found].uses;
     }
     if (!variant_count) goto failed;
+    /* A variant gets at most one template, and one zone can have many variants. */
+    templates = malloc(variant_count * sizeof(*templates));
+    if (!templates) goto failed;
     for (uint32_t first = 0; first < variant_count; ++first) {
         if (variants[first].setup != UINT16_MAX) continue;
         for (;;) {
