@@ -54,6 +54,12 @@ the commit history.
 
 ### Fixed
 
+- `afx_n64` mapped CC 91 (libultra's fxMix) linearly onto IMXL's 3 dB steps,
+  so reverb sends came out 15–25 dB below the N64's: 64 gave −21 dB instead
+  of −3 dB, and 1–4 gave no send at all. It now follows libultra's
+  equal-power wet curve, `sin(π/2 · fx/127)`, rounded to the nearest IMXL
+  step, with any nonzero value kept at IMXL 1 or above. DKR's music sends
+  get louder; flows compiled before this keep the old sends until rebuilt.
 - `afx_c_optimize_events()` sized its template array by the zone count, but a
   zone gets a template for each setup variant used often enough, so a source
   with more variants than zones wrote past the array. SM64's songs reach 65
