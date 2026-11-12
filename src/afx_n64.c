@@ -249,6 +249,17 @@ static uint16_t direct_word(uint8_t pan) {
     return (uint16_t)(0x0f00 | dipan | (pan_cents <= 0 ? 0x10 : 0));
 }
 
+/* libultra's fxMix (CC 91) is an equal-power crossfade: the wet amount is
+ * eqpower[127 - fx] = cos(pi/2 * (127 - fx)/127) = sin(pi/2 * fx/127)
+ * (env.c). IMXL steps 3 dB from 15 = 0 dB down to 1 = -42 dB; 0 is off, so
+ * any nonzero fx keeps at least 1. Returns the send byte's high nibble. */
+static uint8_t n64_fx_imxl(uint8_t fx) {
+    if (fx > 127) fx = 127;
+    if (!fx) return 0;
+    int level = 15 + (int)lround(20.0 * log10(sin(acos(-1.0) / 2.0 * fx / 127.0)) / 3.0);
+    return (uint8_t)(level < 1 ? 1 : level > 15 ? 15 : level);
+}
+
 static int append_zone(afx_c_zone_t **zones, uint32_t *count, uint32_t *capacity, afx_c_zone_t zone) {
     if (*count == *capacity) {
         uint32_t next = *capacity ? *capacity * 2u : 128u;
@@ -314,7 +325,7 @@ static int lower(const bank_t *bank, const afx_c_note_t *input, uint32_t input_c
         afx_c_zone_t zone = {.sample = *sample, .key_min = keymap[2], .key_max = keymap[3],
             .velocity_min = keymap[0], .velocity_max = keymap[1], .bank_msb = note.bank_msb,
             .bank_lsb = note.bank_lsb, .program = note.program,
-            .dsp_send = (uint8_t)(lround(state->reverb * 15.0 / 127.0) << 4),
+            .dsp_send = (uint8_t)(n64_fx_imxl(state->reverb) << 4),
             .setup_mask = (1u << AFX_FIELD_ENV_AD) | (1u << AFX_FIELD_ENV_DR) | (1u << AFX_FIELD_DIRECT)};
         zone.sample.root_key = keymap[4]; zone.sample.tuning_cents = (int8_t)keymap[5];
         zone.setup[AFX_FIELD_ENV_AD] = (uint16_t)(envelope_rate(sbe32(env), ar_time_ms) |
@@ -434,7 +445,7 @@ static int compile_n64(n64_note_t *notes, uint32_t note_count,
                 event.fields[AFX_FIELD_DIRECT] = direct_word((uint8_t)pan);
             } else {
                 event.mask = 1u << AFX_FIELD_DSP_SEND;
-                event.fields[AFX_FIELD_DSP_SEND] = (uint16_t)(lround(source->value * 15.0 / 127.0) << 4);
+                event.fields[AFX_FIELD_DSP_SEND] = (uint16_t)(n64_fx_imxl(source->value) << 4);
             }
             if (append_event(&events, &event_count, &event_capacity, event)) goto failed;
         }

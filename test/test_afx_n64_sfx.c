@@ -89,5 +89,12 @@ int main(void) {
     put_be32(control + 248, 2); put_be32(control + 252, 1);
     int loop; uint32_t first, end;
     assert(make_pcm16(&bank, 192, &encoded, &frames, &first, &end, &loop));
+
+    /* CC 91 follows libultra's equal-power wet curve in 3 dB IMXL steps:
+     * 64 -> -3.0 dB, 32 -> -8.3 dB, 8 -> -20.1 dB, 1 -> -38.2 dB. */
+    static const uint8_t fx[] = {0, 1, 2, 8, 16, 32, 64, 96, 127, 200};
+    static const uint8_t imxl[] = {0, 2, 4, 8, 10, 12, 14, 15, 15, 15};
+    for (uint32_t i = 0; i < sizeof(fx); ++i) assert(n64_fx_imxl(fx[i]) == imxl[i]);
+    for (uint32_t i = 1; i < 128; ++i) assert(n64_fx_imxl((uint8_t)i) >= n64_fx_imxl((uint8_t)(i - 1)));
     return 0;
 }
