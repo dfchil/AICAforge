@@ -174,22 +174,35 @@ deterministic offline lowering step: it modifies NOTE level and KEYOFF timing,
 but adds no SH4 or ARM7 feature. `lfo-rate-steps` must be `0`; rate variation
 is not implemented. Put deliberate rhythmic edits in the MIDI source.
 
-## Looping songs
+## Songs
 
-A song that repeats ends with `LOOP` instead of `END` (AICAflow's
-`AFX_OP_LOOP`, header flag `AFX_FLAG_LOOP` and `loop_tick`): the ARM7
-continues at the loop tick in the same tick, without a gap, until the host
-stops the instance. Append `--loop-tick N` to `afx_compile` (with `--zones` or
-`--sf2`; N is an authored tick, 1000 per second, before the song's end), or
-call `afx_c_compile_zones_loop()` / `afx_c_compile_events_loop()` from C. The
-compiler keeps an instruction boundary at the loop tick, splitting a wait if
-no event falls on it, and joins the burst before the LOOP with the one at its
-target in the work profile. Notes sounding at the end keep sounding across the
-loop unless the source keys them off; a NOTE at the target replaces the voice
-on its channel. `afx_profile apply` keeps the loop (its target follows the
-rewritten stream); `afx_bank --merge` copies it unchanged. Seek checkpoints
-cover the first pass. The N64 CSeq importer still stops at an infinite compact
-loop; it does not emit LOOP yet.
+A song (AICAflow's AFM, firmware ABI 14) is sections played in an order.
+`afx_c_compile_song()` takes each section's events (in ticks from its start,
+on its own local channels), its body length and its join:
+
+- `AFX_JOIN_CONTINUE`: at the body's end the same executor goes on into the
+  next section with its voices, so a note sounding there keeps sounding. A
+  looping song with an intro is an intro section and a body, both continuing,
+  the order looping to the body. Such a section has no tail.
+- `AFX_JOIN_NEW`: the next section starts on the song's other executor with
+  voices of its own, while this one plays its tail, the events after the body
+  (its voices' key-offs and releases), to its end. A section played twice in a
+  row, such as A in intro, A, A, B, is stored once.
+
+Events may include `AFX_OP_FREE`, which gives a voice back to the song's pool
+after its last release. At a new-play join, the tail's events move later by
+whole ticks wherever they and the next section's first events would together
+pass the per-tick budget; `moved_events` and `moved_ticks` in the output say
+how many and how far. The compiler plays the result through with AICAflow's
+`afx_song_measure()` for its pool and work profile, and refuses a song
+AICAflow would refuse, such as one whose tail still plays at the next new-play
+join. `afx_c_compile_song_lanes()` adds a lane per local channel.
+
+`afx_compile --loop-tick N` (with `--zones` or `--sf2`) writes such a
+continue-only song from a MIDI file: an intro before tick N and a body from
+it, as an AFM in place of the AFX. AICAflow cannot seek a song, so it gets no
+AFC, and no AFV; `afx_profile` does not take songs. `LOOP`, which a looping
+flow ended with, is gone with AICAflow format API 6.
 
 ## Performance profiles
 
@@ -324,6 +337,7 @@ permanent core out/core.afs
 level forest out/forest.afs
   bank forest forest.afb
   flow theme controls/theme.afx
+  song race race.afm         # an AFM song, placed as a flow is
   slot song 131072           # bytes for a bank and a flow loaded later
 ```
 

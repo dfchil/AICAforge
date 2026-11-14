@@ -105,6 +105,28 @@ static int flow_entry(entry_t *e) {
     return 0;
 }
 
+/* A song (AFM): its image in the block, the order's body ticks as its length. */
+static int song_entry(entry_t *e) {
+    afx_song_header_t header;
+    afx_song_image_header_t image_header;
+    if (afx_song_validate(e->file, e->file_size, &header) ||
+        afx_song_validate_layout(e->file, e->file_size, NULL, &image_header)) return -1;
+    const uint8_t *image = e->file + header.image_offset;
+    uint64_t ticks = 0;
+    for (uint32_t i = 0; i < image_header.order_count; ++i)
+        ticks += afx_song_section(image, &image_header, afx_song_order(image, &image_header, i)).body_ticks;
+    if (ticks > UINT32_MAX) return -1;
+    e->ticks = (uint32_t)ticks;
+    e->bytes = align_to(header.image_size, 32);
+    /* Its banks as a flow's: slot 0, then the bank list. */
+    afx_file_header_t banks = {.flags = header.flags, .bank_id_low = header.bank_id_low,
+                               .bank_id_high = header.bank_id_high, .banks_offset = header.banks_offset};
+    e->need_count = afx_song_bank_count(e->file, &header);
+    for (uint32_t slot = 0; slot < e->need_count; ++slot)
+        afx_file_bank_identity(e->file, &banks, slot, &e->needs[slot][0], &e->needs[slot][1]);
+    return 0;
+}
+
 static const entry_t *find_bank(const scene_t *s, uint32_t low, uint32_t high) {
     for (uint32_t i = 0; s && i < s->entry_count; ++i)
         if (s->entries[i].kind == AFX_SCENE_BANK && s->entries[i].id_low == low && s->entries[i].id_high == high)
@@ -195,7 +217,7 @@ static int parse(const char *path, char firmware[PATH_BYTES], bool *overlap, sce
         const char *d = words[0];
         scene_t *s = n ? &scenes[n - 1u] : NULL;
         bool scene_line = !strcmp(d, "permanent") || !strcmp(d, "level");
-        bool entry_line = !strcmp(d, "bank") || !strcmp(d, "flow") || !strcmp(d, "slot");
+        bool entry_line = !strcmp(d, "bank") || !strcmp(d, "flow") || !strcmp(d, "song") || !strcmp(d, "slot");
         if (!strcmp(d, "firmware") && w == 2) {
             if (relative_path(path, words[1], firmware)) goto syntax;
         } else if (!strcmp(d, "overlap") && w == 1) {
@@ -235,14 +257,14 @@ static int parse(const char *path, char firmware[PATH_BYTES], bool *overlap, sce
                 continue;
             }
             char input[PATH_BYTES];
-            e->kind = !strcmp(d, "bank") ? AFX_SCENE_BANK : AFX_SCENE_FLOW;
+            e->kind = !strcmp(d, "bank") ? AFX_SCENE_BANK : !strcmp(d, "song") ? AFX_SCENE_SONG : AFX_SCENE_FLOW;
             if (relative_path(path, words[2], input) || read_file(input, &e->file, &e->file_size)) {
                 fprintf(stderr, "%s:%u: cannot read %s\n", path, number, words[2]);
                 goto failed;
             }
-            if (e->kind == AFX_SCENE_BANK ? bank_entry(e) : flow_entry(e)) {
+            if (e->kind == AFX_SCENE_BANK ? bank_entry(e) : e->kind == AFX_SCENE_SONG ? song_entry(e) : flow_entry(e)) {
                 fprintf(stderr, "%s:%u: %s is not a valid %s\n", path, number, words[2],
-                        e->kind == AFX_SCENE_BANK ? "AFB bank" : "AFX flow");
+                        e->kind == AFX_SCENE_BANK ? "AFB bank" : e->kind == AFX_SCENE_SONG ? "AFM song" : "AFX flow");
                 goto failed;
             }
         } else {

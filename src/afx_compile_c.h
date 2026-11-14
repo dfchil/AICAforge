@@ -38,6 +38,12 @@ typedef struct {
 typedef struct {
     uint8_t *afb, *afx, *afc, *afv;
     uint32_t afb_bytes, afx_bytes, afc_bytes, afv_bytes;
+    /* A song (afx_c_compile_song): the AFM, which takes the place of the AFX. */
+    uint8_t *afm;
+    uint32_t afm_bytes;
+    /* Song tail events the per-tick budget moved later at a new-play join,
+     * and the ticks they moved in all. */
+    uint32_t moved_events, moved_ticks;
 } afx_c_output_t;
 
 /* Build checkpoint-only seek data from final AFX bytes, at configurable authored
@@ -105,11 +111,13 @@ int afx_c_optimize_events(const afx_c_event_t *events, uint32_t count,
  * unknown, so the next change of it is kept, as is every channel's first change from the loop
  * tick on. A PATCH left with no fields is removed. Zero
  * tolerances keep everything. `*count` is updated; events end up in (tick, order) order. */
+#define AFX_C_NO_LOOP UINT32_MAX
 typedef struct {
     uint8_t pan_tolerance;
     uint8_t level_tolerance;
-    /* A looping flow's loop tick (AFX_C_NO_LOOP for none): playback reaches it a second time with
-     * the state the end of the flow left, so every channel's state is unknown again from there. */
+    /* A looping song's loop tick (AFX_C_NO_LOOP for none), the start of the body a continue
+     * join returns to: playback reaches it a second time with the state the end of the song
+     * left, so every channel's state is unknown again from there. */
     uint32_t loop_tick;
 } afx_c_simplify_t;
 int afx_c_simplify_events(afx_c_event_t *events, uint32_t *count, const afx_c_simplify_t *options);
@@ -132,8 +140,12 @@ int afx_c_assign_channels(const afx_c_note_t *notes, uint32_t count,
 int afx_c_compile_zones(const afx_c_note_t *notes, uint32_t count,
                         uint32_t tick_rate, const afx_c_zone_t *zones,
                         uint32_t zone_count, afx_c_output_t *out);
-/* As afx_c_compile_zones, looping back to loop_tick (see afx_c_compile_events_loop). */
-int afx_c_compile_zones_loop(const afx_c_note_t *notes, uint32_t count,
+/* As afx_c_compile_zones, for a song that repeats from loop_tick (an authored
+ * tick before the end): an AFM of an intro section before loop_tick and a body
+ * after it, both joined by AICAflow's continue join, so a voice sounding at
+ * the loop keeps sounding, as a LOOP flow's did; the order is intro, body,
+ * looping to the body. A loop tick of zero makes the body the whole song. */
+int afx_c_compile_zones_song(const afx_c_note_t *notes, uint32_t count,
                              uint32_t tick_rate, uint32_t loop_tick, const afx_c_zone_t *zones,
                              uint32_t zone_count, afx_c_output_t *out);
 
@@ -147,18 +159,46 @@ int afx_c_compile_events(const afx_c_event_t *events, uint32_t count,
                          uint32_t duration_ticks, uint32_t tick_rate,
                          const afx_c_zone_t *zones, uint32_t zone_count,
                          afx_c_output_t *out);
-/* As above, for a flow that repeats: the stream ends with LOOP back to the
- * instruction boundary at `loop_tick` (an authored tick before
- * duration_ticks; a WAIT is split there if no event falls on it), the header
- * carries AFX_FLAG_LOOP and loop_tick, and the work profile joins the burst
- * before the LOOP with the one at its target. Voices sounding at the end are
- * not keyed off by the loop: author KEYOFFs where the source cuts them. A
- * controlled (PARK) flow cannot loop. AFX_C_NO_LOOP compiles a finite flow. */
-#define AFX_C_NO_LOOP UINT32_MAX
-int afx_c_compile_events_loop(const afx_c_event_t *events, uint32_t count,
-                              uint32_t duration_ticks, uint32_t loop_tick, uint32_t tick_rate,
-                              const afx_c_zone_t *zones, uint32_t zone_count,
-                              afx_c_output_t *out);
+/* A song (AICAflow's AFM, firmware ABI 14): sections played in an order.
+ * A section's events are in ticks from its start, on its own local channels,
+ * and may include AFX_OP_FREE (give the channel's voice back to the pool).
+ * At body_ticks its NEXT moves the song to the next order position:
+ * - AFX_JOIN_CONTINUE: the same executor goes on into the next section with
+ *   its voices; no event may come after body_ticks, and end_ticks equals it;
+ * - AFX_JOIN_NEW: the next section starts on the song's other executor with
+ *   voices of its own, while this one plays its tail (events after
+ *   body_ticks) to END at end_ticks or after its last event.
+ * Events at body_ticks itself play before the NEXT. After the last order
+ * position the song goes on at loop_index, or with AFX_C_SONG_ENDS ends.
+ *
+ * Every section shares the setup table (zones, as afx_c_compile_events takes
+ * them). A tick's work beyond the budget moves later as in a flow; a body
+ * event moved past body_ticks is refused. At a new-play join, the tail's
+ * events move later by whole ticks wherever they and the next sections'
+ * first events would together pass the budget; out->moved_events and
+ * moved_ticks say how many and how far. A song AICAflow would refuse (a tail
+ * still playing at the next new-play join, say) is refused.
+ * out gets the AFB and the AFM (afm, afm_bytes); no AFC, as AICAflow cannot
+ * seek a song, and no AFV. */
+typedef struct {
+    const afx_c_event_t *events;
+    uint32_t count;
+    uint32_t body_ticks; /* NEXT: the next section starts here. */
+    uint32_t end_ticks; /* END; at least body_ticks. */
+    uint32_t join; /* AFX_JOIN_NEW or AFX_JOIN_CONTINUE. */
+} afx_c_section_t;
+#define AFX_C_SONG_ENDS UINT32_MAX
+int afx_c_compile_song(const afx_c_section_t *sections, uint32_t section_count,
+                       const uint16_t *order, uint32_t order_count, uint32_t loop_index,
+                       uint32_t tick_rate, const afx_c_zone_t *zones, uint32_t zone_count,
+                       afx_c_output_t *out);
+/* As afx_c_compile_song, with a lane per local channel (AICAflow lanes): lanes
+ * holds lane_channels entries, at least the channels the song uses. */
+int afx_c_compile_song_lanes(const afx_c_section_t *sections, uint32_t section_count,
+                             const uint16_t *order, uint32_t order_count, uint32_t loop_index,
+                             const uint8_t *lanes, uint32_t lane_channels,
+                             uint32_t tick_rate, const afx_c_zone_t *zones, uint32_t zone_count,
+                             afx_c_output_t *out);
 
 /* Compile a resolved timeline against one explicit sample. All output sidecars
  * are allocated with the AFB/AFX pair and released by afx_c_output_free(). */

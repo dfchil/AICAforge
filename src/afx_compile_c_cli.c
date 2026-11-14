@@ -155,7 +155,8 @@ int main(int argc, char **argv) {
     int sf2_mode = argc == 7 && !strcmp(argv[2], "--sf2");
     if ((argc != 4 && argc != 5) && !zones_mode && !sf2_mode)
         return fprintf(stderr, "Append --checkpoint-seconds N to set AFC spacing (default 10), and\n"
-                       "--loop-tick N (an authored tick, 1000 per second) for a song that repeats from there.\n"
+                       "--loop-tick N (an authored tick, 1000 per second) for a song that repeats from there:\n"
+                       "the output is then an AFM song (out.afm) instead of an AFX flow.\n"
                        "usage: %s --seek flow.afx out.afc\n"
                        "       %s --visual flow.afx out.afv\n"
                        "       %s source.mid [sample.pcm] out.afb out.afx\n"
@@ -180,9 +181,9 @@ int main(int argc, char **argv) {
     if (!parsed && sf2_mode && (afx_c_parse_sample_format(argv[3], &sf2_options.sample_format) ||
                                 afx_c_sf2_resolve(argv[4], notes, count, &sf2_options, &sf2))) parsed = -1;
     int result = parsed || (argc == 5 && (!pcm || (pcm_bytes & 1))) ? -1 :
-                 sf2_mode ? afx_c_compile_zones_loop(sf2.notes, sf2.note_count, 1000, loop_tick,
+                 sf2_mode ? afx_c_compile_zones_song(sf2.notes, sf2.note_count, 1000, loop_tick,
                                                       sf2.zones, sf2.zone_count, &out) :
-                 zones_mode ? afx_c_compile_zones_loop(notes, count, 1000, loop_tick, zones, zone_count, &out) :
+                 zones_mode ? afx_c_compile_zones_song(notes, count, 1000, loop_tick, zones, zone_count, &out) :
                  loop_tick != AFX_C_NO_LOOP ? fprintf(stderr, "--loop-tick needs --zones or --sf2\n"), -1 :
                  argc == 5 ? afx_c_compile_sample(notes, count, 1000, &sample, &out) :
                  afx_c_compile_sine(notes, count, 1000, &out);
@@ -191,6 +192,14 @@ int main(int argc, char **argv) {
     free_zones(zones, owned, zone_count);
     afx_c_sf2_output_free(&sf2);
     if (result) return fprintf(stderr, "cannot compile source\n"), 1;
+    if (out.afm) {
+        /* A song: its AFB and AFM, no AFC or AFV. */
+        result = write_file(argv[argc - 2], out.afb, out.afb_bytes) ||
+                 write_file(argv[argc - 1], out.afm, out.afm_bytes);
+        afx_c_output_free(&out);
+        if (result) fprintf(stderr, "cannot write %s and its .afb\n", argv[argc - 1]);
+        return result ? 1 : 0;
+    }
     if (seconds != AFX_C_CHECKPOINT_SECONDS) {
         free(out.afc); out.afc = NULL; out.afc_bytes = 0;
         if (afx_c_build_seek(&out, seconds)) {

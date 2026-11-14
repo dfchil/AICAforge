@@ -84,6 +84,20 @@ def main() -> None:
         arena = 0x1fcec0 - base
         assert headroom == arena - ((base + 2047) & ~2047) + base - RING - len(payload) - block
 
+        # A song entry: the looping MIDI fixture as an AFM, placed like a flow.
+        subprocess.run([str(BUILD / "afx_compile"), str(d / "fixture.mid"), "--zones", str(d / "fixture.zones"),
+                        str(d / "loop.afb"), str(d / "loop.afm"), "--loop-tick", "1500"], check=True,
+                       stdout=subprocess.DEVNULL)
+        (d / "songs.afsm").write_text(f"firmware {FIRMWARE}\nlevel songs out/songs.afs\n"
+                                      "  bank loop loop.afb\n  song theme loop.afm\n")
+        scene(d / "songs.afsm")
+        loop_bank, theme = entries((d / "out/songs.afs").read_bytes())
+        afm = (d / "loop.afm").read_bytes()
+        image_bytes = struct.unpack_from("<I", afm, 20)[0]
+        assert theme[:3] == (5, "theme", afm) and theme[4] == (image_bytes + 31) & ~31 and theme[5] > 0
+        (d / "nobank.afsm").write_text(f"firmware {FIRMWARE}\nlevel songs out/songs.afs\n  song theme loop.afm\n")
+        scene(d / "nobank.afsm", ok=False)
+
         # The level's flow needs the core bank, which only the permanent scene has.
         (d / "alone.afsm").write_text(f"firmware {FIRMWARE}\n" + level.replace("out/forest", "out/alone"))
         assert "needs bank c0de0002c0de0001 in slot 1" in scene(d / "alone.afsm", ok=False).stderr

@@ -7,6 +7,22 @@ the commit history.
 
 ### Added
 
+- Songs (AICAflow AFM, firmware ABI 14): `afx_c_compile_song()` and
+  `afx_c_compile_song_lanes()` compile sections, their joins (continue or new
+  play), an order and a loop index into an AFB and an AFM with one shared
+  setup table. At a new-play join, tail events move later where they and the
+  next section's head would pass the per-tick budget, and the output reports
+  how many moved and how far. `afx_compile --loop-tick N` now writes a
+  continue-only song (intro and body) instead of a LOOP flow, through
+  `afx_c_compile_zones_song()`. `afx_scene` manifests take `song NAME file.afm`
+  entries. Flows without a loop compile byte for byte as before. Needs the
+  pinned AICAflow with songs (format API 6).
+
+### Removed
+
+- `afx_c_compile_events_loop()` and `afx_c_compile_zones_loop()`, and LOOP in
+  `afx_profile`: AICAflow format API 6 has no LOOP.
+
 - `afx_scene manifest.afsm` plans AICAflow AFS scene files: the banks, flows,
   slots and DSP ring of each scene with their places in the scene's AICA
   block, laid out with the runtime's rounding and checked with the loader's
