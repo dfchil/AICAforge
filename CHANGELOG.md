@@ -7,6 +7,10 @@ the commit history.
 
 ### Added
 
+- AFBM `coding <song> <pcm8|adpcm> <rom-start>...`: afx_vgm codes each named
+  sample of a MultiPCM recording, by its start in the sample ROM, as PCM8 or
+  ADPCM; the rest follow `--adpcm`. Without coding lines the output is
+  unchanged.
 - Songs (AICAflow AFM, firmware ABI 14): `afx_c_compile_song()` and
   `afx_c_compile_song_lanes()` compile sections, their joins (continue or new
   play), an order and a loop index into an AFB and an AFM with one shared

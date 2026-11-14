@@ -18,7 +18,7 @@
 
 enum { TICK_RATE = 1000, VGM_RATE = 44100, MULTIPCM_ROM = 0x89, SLOTS = 28, CHIPS = 2 };
 
-typedef struct { uint8_t *data; uint32_t bytes, frames; uint16_t loop; } sample_t;
+typedef struct { uint8_t *data; uint32_t bytes, frames, rom; uint16_t loop; } sample_t; /* rom: its start in the chip's sample ROM */
 typedef struct { uint8_t kind, chip, slot; uint32_t tick, order, mask; uint16_t setup; uint16_t fields[AFX_FIELD_COUNT]; } raw_event_t;
 typedef struct { double value, target; uint32_t tick; uint16_t mix; uint8_t interpolate; } level_t;
 typedef struct {
@@ -170,7 +170,7 @@ static int sample_for(parser_t *parser, uint8_t chip, uint8_t slot, uint32_t *ou
     sample_t *sample = &parser->samples[parser->sample_count];
     sample->data = malloc(frames);
     if (!sample->data) return -1;
-    memcpy(sample->data, raw, frames); sample->bytes = sample->frames = frames; sample->loop = (uint16_t)loop;
+    memcpy(sample->data, raw, frames); sample->bytes = sample->frames = frames; sample->loop = (uint16_t)loop; sample->rom = start;
     *out = parser->sample_count++; return 0;
 }
 
@@ -432,10 +432,14 @@ static char *with_suffix(const char *path, const char *suffix) {
     memcpy(result, path, head); memcpy(result + head, suffix, tail + 1); return result;
 }
 
-static int encode_adpcm_zones(afx_c_zone_t *zones, uint32_t count, uint8_t ***owned, uint32_t *owned_count) {
+/* wants(data, user) picks the zones to encode by their sample's bytes; NULL encodes every zone. */
+typedef int (*adpcm_wants_t)(const uint8_t *data, const void *user);
+static int encode_adpcm_zones(afx_c_zone_t *zones, uint32_t count, uint8_t ***owned, uint32_t *owned_count,
+                              adpcm_wants_t wants, const void *user) {
     const uint8_t **source = calloc(count, sizeof(*source)); uint8_t **data = calloc(count, sizeof(*data));
     if (!source || !data) { free(source); free(data); return -1; }
     for (uint32_t i = 0; i < count; ++i) {
+        if (wants && !wants(zones[i].sample.data, user)) continue;
         uint32_t prior = 0;
         while (prior < i && source[prior] != zones[i].sample.data) ++prior;
         if (prior < i) {
@@ -463,7 +467,28 @@ failed:
  * recording given on the command line is converted as the song named by --name (default: the output's file
  * name), with that song's sections and order when it has them, and with its samples trimmed when the map
  * says `trim`. A VGM carries its own samples, so `source` and `map` lines do not apply. */
-typedef struct { int trim, found; afx_map_structure_t structure; } vgm_map_t;
+enum { VGM_MAX_CODINGS = 256 };
+/* A bank map's `coding <song> <pcm8|adpcm> <rom-start>...` lines for this song: each named sample's coding. */
+typedef struct { uint32_t rom; uint8_t adpcm; } vgm_coding_t;
+typedef struct { int trim, found; afx_map_structure_t structure; vgm_coding_t coding[VGM_MAX_CODINGS]; uint32_t coding_count; } vgm_map_t;
+
+static int parse_coding(const char *line, vgm_map_t *map) {
+    char song[AFX_MAP_NAME_BYTES], format[8]; int used = 0;
+    if (sscanf(line, "coding %63s %7s %n", song, format, &used) != 2 || !used) return -1;
+    int adpcm = !strcmp(format, "adpcm");
+    if (!adpcm && strcmp(format, "pcm8")) return -1;
+    const char *cursor = line + used; unsigned named = 0;
+    for (;;) {
+        while (*cursor == ' ' || *cursor == '\t') ++cursor;
+        if (!*cursor || *cursor == '\n' || *cursor == '\r' || *cursor == '#') break;
+        char *end; unsigned long rom = strtoul(cursor, &end, 16);
+        if (end == cursor || (*end && *end != ' ' && *end != '\t' && *end != '\n' && *end != '\r') || rom > 0xffffffu) return -1;
+        for (uint32_t i = 0; i < map->coding_count; ++i) if (map->coding[i].rom == rom) return -1; /* named twice */
+        if (map->coding_count == VGM_MAX_CODINGS) return -1;
+        map->coding[map->coding_count++] = (vgm_coding_t){(uint32_t)rom, (uint8_t)adpcm}; ++named; cursor = end;
+    }
+    return named ? 0 : -1;
+}
 
 static int read_vgm_map(const char *path, const char *name, vgm_map_t *map) {
     FILE *file = fopen(path, "r"); char line[4096], song[AFX_MAP_NAME_BYTES]; int status = -1;
@@ -481,6 +506,9 @@ static int read_vgm_map(const char *path, const char *name, vgm_map_t *map) {
             bad = afx_map_line_song(cursor, song, sizeof(song));
             if (!bad && !strcmp(song, name))
                 bad = !map->found || (kind[0] == 's' ? afx_map_parse_section(cursor, &map->structure) : afx_map_parse_order(cursor, &map->structure));
+        } else if (!strcmp(kind, "coding")) {
+            bad = afx_map_line_song(cursor, song, sizeof(song));
+            if (!bad && !strcmp(song, name)) bad = !map->found || parse_coding(cursor, map);
         } else bad = 1;
         if (bad) { fprintf(stderr, "afx_vgm: %s:%u: not a line afx_vgm takes here: %s", path, number, cursor); goto done; }
     }
@@ -490,20 +518,38 @@ done:
     fclose(file); return status;
 }
 
-typedef struct { uint8_t **data; uint32_t count; } adpcm_owned_t;
+/* Which samples are ADPCM: the map's coding lines by ROM start, else --adpcm for all or none. */
+typedef struct { const parser_t *parser; const vgm_map_t *map; int adpcm; } coding_choice_t;
+static int coding_wants(const uint8_t *data, const void *user) {
+    const coding_choice_t *choice = user;
+    for (uint32_t k = 0; k < choice->parser->sample_count; ++k) {
+        if (choice->parser->samples[k].data != data) continue;
+        for (uint32_t i = 0; i < choice->map->coding_count; ++i)
+            if (choice->map->coding[i].rom == choice->parser->samples[k].rom) return choice->map->coding[i].adpcm;
+        break;
+    }
+    return choice->adpcm;
+}
+static int any_adpcm(const coding_choice_t *choice) {
+    if (choice->adpcm) return 1;
+    for (uint32_t i = 0; i < choice->map->coding_count; ++i) if (choice->map->coding[i].adpcm) return 1;
+    return 0;
+}
+typedef struct { uint8_t **data; uint32_t count; const coding_choice_t *choice; } adpcm_owned_t;
 static int encode_templates(afx_c_zone_t *templates, uint32_t count, void *user) {
     adpcm_owned_t *owned = user;
-    return encode_adpcm_zones(templates, count, &owned->data, &owned->count);
+    return encode_adpcm_zones(templates, count, &owned->data, &owned->count, coding_wants, owned->choice);
 }
 
 static int compile_vgm_song(const parser_t *parser, const afx_c_event_t *events, uint32_t count,
                             afx_c_zone_t *zones, uint32_t zone_count, const vgm_map_t *map, int adpcm,
                             afx_c_output_t *out) {
-    const afx_map_structure_t *s = &map->structure; adpcm_owned_t owned = {0}; afx_c_split_report_t report;
+    const afx_map_structure_t *s = &map->structure; afx_c_split_report_t report;
+    const coding_choice_t choice = {parser, map, adpcm}; adpcm_owned_t owned = {0, 0, &choice};
     uint32_t end = parser->total_samples ? tick(parser->total_samples) : tick(parser->elapsed);
     int status = afx_c_compile_windows(events, count, end, zones, zone_count, s->windows, s->section_count,
                                        s->order, s->order_count, s->loop_index, map->trim,
-                                       adpcm ? encode_templates : NULL, &owned, NULL, 0, TICK_RATE, out, &report);
+                                       any_adpcm(&choice) ? encode_templates : NULL, &owned, NULL, 0, TICK_RATE, out, &report);
     for (uint32_t i = 0; i < owned.count; ++i) free(owned.data[i]);
     free(owned.data);
     if (status) { fprintf(stderr, "afx_vgm: the song's sections do not split this recording, or AICAflow would refuse the song\n"); return -1; }
@@ -540,6 +586,11 @@ int main(int argc, char **argv) {
     afx_c_output_t result = {0}; char *bank = NULL, *seek = NULL, *visual = NULL; uint8_t **adpcm_data = NULL; uint32_t adpcm_count = 0; int status = 1;
     if (parse_vgm(source, gain, &parser)) { fprintf(stderr, "afx_vgm: cannot parse %s\n", source); goto done; }
     if (compact(&parser, &events, &count, &zones, &zone_count) || !count || !zone_count) { fprintf(stderr, "afx_vgm: cannot lower source events\n"); goto done; }
+    for (uint32_t i = 0; i < map.coding_count; ++i) {
+        uint32_t k = 0;
+        while (k < parser.sample_count && parser.samples[k].rom != map.coding[i].rom) ++k;
+        if (k == parser.sample_count) { fprintf(stderr, "afx_vgm: coding names sample %06x, which %s never plays\n", (unsigned)map.coding[i].rom, source); goto done; }
+    }
     if (song) {
         if (compile_vgm_song(&parser, events, count, zones, zone_count, &map, adpcm, &result)) goto done;
         bank = with_suffix(output, ".afb");
@@ -556,7 +607,8 @@ int main(int argc, char **argv) {
         fprintf(stderr, "afx_vgm: cannot optimize source events\n"); goto done;
     }
     free(events); free(zones); events = optimized; zones = templates; optimized = NULL; templates = NULL; zone_count = template_count;
-    if (adpcm && encode_adpcm_zones(zones, zone_count, &adpcm_data, &adpcm_count)) { fprintf(stderr, "afx_vgm: ADPCM encoding failed\n"); goto done; }
+    const coding_choice_t choice = {&parser, &map, adpcm};
+    if (any_adpcm(&choice) && encode_adpcm_zones(zones, zone_count, &adpcm_data, &adpcm_count, coding_wants, &choice)) { fprintf(stderr, "afx_vgm: ADPCM encoding failed\n"); goto done; }
     if (afx_c_compile_events(events, count, tick(parser.elapsed), TICK_RATE, zones, zone_count, &result)) { fprintf(stderr, "afx_vgm: AFX execution or asset limits exceeded\n"); goto done; }
     bank = with_suffix(output, ".afb"); seek = with_suffix(output, ".afc"); visual = with_suffix(output, ".afv");
     if (!bank || !seek || !visual || write_file(output, result.afx, result.afx_bytes) || write_file(bank, result.afb, result.afb_bytes) ||
