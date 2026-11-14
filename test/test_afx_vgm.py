@@ -130,4 +130,23 @@ order   song intro a a b loop=a
     (root / "bad.afbm").write_text("song song x.vgm\nsection song a 0 100\n")
     assert subprocess.run([str(TOOL), str(source), str(root / "bad.afm"), "--map", str(root / "bad.afbm"), "--name", "song"]).returncode != 0
 
+    # `coding` names samples by their start in the sample ROM (the fixture's one sample starts at 0): ADPCM for
+    # that sample only, or PCM8 against --adpcm. A sample the recording never plays, or a bad format, is refused.
+    pcm8_bank = output.with_suffix(".afb").read_bytes()
+    (root / "coded.afbm").write_text(structure + "coding song adpcm 0\n")
+    coded = root / "coded.afm"
+    subprocess.run([str(TOOL), str(source), str(coded), "--map", str(root / "coded.afbm"), "--name", "song"], check=True)
+    assert len(coded.with_suffix(".afb").read_bytes()) < len(pcm8_bank)
+    all_adpcm = root / "all.afm"
+    subprocess.run([str(TOOL), str(source), str(all_adpcm), "--map", str(root / "bank.afbm"), "--name", "song", "--adpcm"], check=True)
+    assert all_adpcm.with_suffix(".afb").read_bytes() == coded.with_suffix(".afb").read_bytes()
+    (root / "kept.afbm").write_text(structure + "coding song pcm8 0\n")
+    kept = root / "kept.afm"
+    subprocess.run([str(TOOL), str(source), str(kept), "--map", str(root / "kept.afbm"), "--name", "song", "--adpcm"], check=True)
+    assert kept.with_suffix(".afb").read_bytes() == pcm8_bank
+    for bad in ("coding song adpcm 1234\n", "coding song pcm16 0\n", "coding song adpcm 0 0\n", "coding song adpcm\n"):
+        (root / "badcoding.afbm").write_text(structure + bad)
+        assert subprocess.run([str(TOOL), str(source), str(root / "bad.afm"), "--map", str(root / "badcoding.afbm"), "--name", "song"],
+                              capture_output=True).returncode != 0, bad
+
 print("native VGM importer fixture passed")
