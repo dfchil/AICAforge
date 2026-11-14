@@ -443,6 +443,8 @@ static int rewrite_stream(const uint8_t *image, const afx_file_header_t *header,
     uint32_t at = header->stream_offset, end = at + header->stream_size, tick = 0, ordinal = 0, ordinal_tick = UINT32_MAX, commands = 0, writes = 0;
     uint32_t loop_tick = header->flags & AFX_FLAG_LOOP ? header->loop_tick : UINT32_MAX, loop_offset = UINT32_MAX;
     params_t active[AFX_MAX_FLOW_CHANNELS] = {{0}}; bool active_note[AFX_MAX_FLOW_CHANNELS] = {0}; *max_commands = *max_writes = 0;
+    /* A REPEAT's target would move with the rewrite; not supported yet. */
+    if (header->flags & AFX_FLAG_REPEAT) return -1;
     while (at < end) {
         afx_event_t event; uint16_t values[AFX_FIELD_COUNT];
         if (afx_decode_event(image + at, end - at, &event)) return -1;

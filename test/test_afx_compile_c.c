@@ -35,6 +35,34 @@ static void assert_stream_budget(const afx_c_output_t *out) {
     assert(header.work_profile && header.work_profile == AFX_WORK_PROFILE(peak_commands, peak_writes));
 }
 
+/* Plays a flow's stream as AICAflow's executor does, LOOP and REPEAT
+ * included, and lists (playback tick, opcode) for each NOTE and KEYOFF until
+ * `until`. Returns the count. */
+static uint32_t play(const afx_c_output_t *out, uint32_t until, uint32_t ticks[], uint8_t ops[],
+                     uint32_t capacity) {
+    afx_file_header_t h;
+    assert(afx_file_validate(out->afx, out->afx_bytes, &h) == AFX_OK);
+    const uint8_t *stream = out->afx + h.image_offset + h.stream_offset;
+    uint32_t cursor = 0, tick = 0, count = 0, repeat_state = 0;
+    while (tick < until) {
+        afx_event_t event;
+        assert(cursor < h.stream_size &&
+               afx_decode_event(stream + cursor, h.stream_size - cursor, &event) == AFX_OK);
+        cursor += event.bytes;
+        if (event.opcode >= AFX_OP_WAIT8 && event.opcode <= AFX_OP_WAIT32) tick += event.wait;
+        else if (event.opcode == AFX_OP_LOOP) cursor = event.target, repeat_state = 0;
+        else if (event.opcode == AFX_OP_REPEAT) {
+            if (!repeat_state) repeat_state = event.count + 1u;
+            if (--repeat_state) cursor = event.target;
+        } else if (event.opcode == AFX_OP_END) break;
+        else if (event.opcode == AFX_OP_NOTE || event.opcode == AFX_OP_KEYOFF) {
+            assert(count < capacity);
+            ticks[count] = tick; ops[count++] = event.opcode;
+        }
+    }
+    return count;
+}
+
 int main(void) {
     const afx_c_note_t long_note = {.start_tick = 0, .end_tick = 5000, .key = 69, .velocity = 100};
     afx_c_output_t timed;
@@ -275,6 +303,76 @@ int main(void) {
     assert(afx_c_compile_events_loop(parked, 4, 30, 0, 1000, trace_zone, 1, &out));
     assert(!afx_c_compile_events(parked, 4, 30, 1000, trace_zone, 1, &out));
     afx_c_output_free(&out);
+    /* A song of intro, A, A, B that loops back into A, on the playback
+       timeline: A's events once, at its first play, B's at their own ticks. */
+    {
+        const afx_c_event_t song[] = {
+            {.tick = 0, .opcode = AFX_OP_NOTE, .mask = AFX_NOTE_PL_MASK,
+             .fields = {[AFX_FIELD_PITCH] = 0x0800, [AFX_FIELD_MIX] = 0x3024}},
+            {.tick = 5, .opcode = AFX_OP_KEYOFF},
+            {.tick = 10, .opcode = AFX_OP_NOTE, .mask = AFX_NOTE_PL_MASK,
+             .fields = {[AFX_FIELD_PITCH] = 0x0900, [AFX_FIELD_MIX] = 0x3024}},
+            {.tick = 15, .opcode = AFX_OP_KEYOFF},
+            {.tick = 30, .opcode = AFX_OP_NOTE, .mask = AFX_NOTE_PL_MASK,
+             .fields = {[AFX_FIELD_PITCH] = 0x0a00, [AFX_FIELD_MIX] = 0x3024}},
+            {.tick = 35, .opcode = AFX_OP_KEYOFF},
+        };
+        const afx_c_repeat_t twice = {.from_tick = 10, .to_tick = 20, .count = 1};
+        afx_file_header_t h;
+        afx_validation_profile_t work;
+        uint64_t duration;
+        uint32_t num, den, ticks[32];
+        uint8_t ops[32];
+        assert(!afx_c_compile_events_repeat(song, 6, 40, 12, &twice, 1000, trace_zone, 1, &out));
+        assert(afx_file_validate_profile(out.afx, out.afx_bytes, &h, &work) == AFX_OK);
+        assert((h.flags & AFX_FLAG_REPEAT) && (h.flags & AFX_FLAG_LOOP) && h.loop_tick == 12);
+        assert(h.work_profile == AFX_WORK_PROFILE(work.peak_commands, work.peak_register_writes));
+        assert(afx_flow_duration(out.afx, out.afx_bytes, &duration, &num, &den) == AFX_OK && duration == 40);
+        assert(!out.afc && out.afv); /* No seek: AICAflow refuses it for a REPEAT. */
+        /* As the source plays: A twice, B, then from 12 the rest of A, A, B. */
+        static const uint32_t want_ticks[] = {0, 5, 10, 15, 20, 25, 30, 35, 43, 48, 53, 58, 63};
+        static const uint8_t want_ops[] = {AFX_OP_NOTE, AFX_OP_KEYOFF, AFX_OP_NOTE, AFX_OP_KEYOFF,
+            AFX_OP_NOTE, AFX_OP_KEYOFF, AFX_OP_NOTE, AFX_OP_KEYOFF, AFX_OP_KEYOFF, AFX_OP_NOTE,
+            AFX_OP_KEYOFF, AFX_OP_NOTE, AFX_OP_KEYOFF};
+        uint32_t played = play(&out, 68, ticks, ops, 32);
+        assert(played == 13);
+        for (uint32_t i = 0; i < played; ++i) assert(ticks[i] == want_ticks[i] && ops[i] == want_ops[i]);
+        afx_c_output_free(&out);
+        /* Finite, and with the loop at the REPEAT's own tick, which lands after it. */
+        assert(!afx_c_compile_events_repeat(song, 6, 40, AFX_C_NO_LOOP, &twice, 1000, trace_zone, 1, &out));
+        assert(afx_file_validate(out.afx, out.afx_bytes, &h) == AFX_OK && !(h.flags & AFX_FLAG_LOOP));
+        assert(play(&out, 1000, ticks, ops, 32) == 8 && ticks[7] == 35);
+        afx_c_output_free(&out);
+        assert(!afx_c_compile_events_repeat(song, 6, 40, 30, &twice, 1000, trace_zone, 1, &out));
+        assert(afx_file_validate(out.afx, out.afx_bytes, &h) == AFX_OK && h.loop_tick == 20);
+        afx_c_output_free(&out);
+        /* Refused: an event or the loop tick in the repeated play, a bad span,
+           repeats past the end, and a controlled flow. */
+        afx_c_event_t stray[7];
+        memcpy(stray, song, sizeof(song));
+        stray[6] = (afx_c_event_t){.tick = 22, .order = 1, .opcode = AFX_OP_KEYOFF};
+        assert(afx_c_compile_events_repeat(stray, 7, 40, 12, &twice, 1000, trace_zone, 1, &out));
+        assert(afx_c_compile_events_repeat(song, 6, 40, 25, &twice, 1000, trace_zone, 1, &out));
+        const afx_c_repeat_t none = {10, 20, 0}, empty = {20, 20, 1}, long_ = {10, 20, 3}, wide = {10, 20, 256};
+        assert(afx_c_compile_events_repeat(song, 6, 40, 12, &none, 1000, trace_zone, 1, &out));
+        assert(afx_c_compile_events_repeat(song, 6, 40, 12, &empty, 1000, trace_zone, 1, &out));
+        assert(afx_c_compile_events_repeat(song, 6, 40, 12, &long_, 1000, trace_zone, 1, &out));
+        assert(afx_c_compile_events_repeat(song, 6, 40, 12, &wide, 1000, trace_zone, 1, &out));
+        assert(afx_c_compile_events_repeat(song, 6, 40, 12, NULL, 1000, trace_zone, 1, &out));
+        const afx_c_event_t parked_song[] = {song[0], song[1], song[2], song[3],
+            {.tick = 40, .order = 1, .opcode = AFX_OP_PARK}};
+        assert(afx_c_compile_events_repeat(parked_song, 5, 40, AFX_C_NO_LOOP, &twice, 1000,
+                                           trace_zone, 1, &out));
+        /* A tick's work moved past to_tick would play once, not twice: refused. */
+        afx_c_event_t crowded[46];
+        memcpy(crowded, song, sizeof(song));
+        for (uint32_t i = 0; i < 40; ++i)
+            crowded[6 + i] = (afx_c_event_t){.tick = 19, .order = i, .opcode = AFX_OP_KEYOFF,
+                                             .channel = (uint8_t)i};
+        assert(afx_c_compile_events_repeat(crowded, 46, 40, 12, &twice, 1000, trace_zone, 1, &out));
+        assert(!afx_c_compile_events_loop(crowded, 46, 40, 12, 1000, trace_zone, 1, &out)); /* Fine without. */
+        afx_c_output_free(&out);
+    }
     /* A release tail occupies its channel, but KEYOFF remains at the musical
        note end.  This is how the offline bank builder preserves an SF2
        release without inventing an ARM7-specific command. */

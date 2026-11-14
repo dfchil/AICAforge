@@ -7,6 +7,17 @@ the commit history.
 
 ### Added
 
+- `afx_c_compile_events_repeat()` stores a span that plays several times in a
+  row once, followed by AICAflow's `REPEAT` (`afx_c_repeat_t`: `from_tick`,
+  `to_tick`, `count`). Events, duration and loop tick are on the playback
+  timeline; the compiler moves what follows the repeats back by their length,
+  and a loop tick inside the span plays it in full again after the loop, as
+  the source does. Work that the execution budget would move across an end of
+  the span is refused. The flow's AFV follows the repeats; it gets no AFC, as
+  AICAflow cannot seek it, and `afx_profile` refuses it. Flows without a
+  repeat compile byte for byte as before. Needs the pinned AICAflow with
+  `AFX_OP_REPEAT` (format API 6, firmware ABI 14).
+
 - `afx_scene manifest.afsm` plans AICAflow AFS scene files: the banks, flows,
   slots and DSP ring of each scene with their places in the scene's AICA
   block, laid out with the runtime's rounding and checked with the loader's

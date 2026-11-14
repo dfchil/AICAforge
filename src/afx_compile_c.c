@@ -444,6 +444,7 @@ static int visual_pass(const uint8_t *image, const afx_file_header_t *header,
     uint16_t state[AFX_MAX_FLOW_CHANNELS][AFX_FIELD_COUNT] = {{0}};
     uint32_t started[AFX_MAX_FLOW_CHANNELS] = {0}, at = header->stream_offset;
     uint32_t end = at + header->stream_size, tick = 0;
+    uint32_t repeat_state = 0; /* As the firmware's: one more than the jumps left, or 0. */
     uint8_t active[AFX_MAX_FLOW_CHANNELS] = {0};
     for (uint32_t frame = 0; frame < frames; ++frame) {
         uint64_t target64 = (uint64_t)frame * header->tick_rate_num /
@@ -467,6 +468,11 @@ static int visual_pass(const uint8_t *image, const afx_file_header_t *header,
                 if (active[event.channel] && afx_apply_fields(state[event.channel], NULL, event.mask,
                                                                event.values, afx_field_value_bytes(event.mask))) return -1;
             } else if (event.opcode == AFX_OP_KEYOFF) active[event.channel] = 0;
+            else if (event.opcode == AFX_OP_REPEAT) {
+                /* Follow the repeats, so the frames match playback. */
+                if (!repeat_state) repeat_state = event.count + 1u;
+                if (--repeat_state) at = header->stream_offset + event.target;
+            }
         }
         double levels[VISUAL_BANDS] = {0};
         for (uint32_t channel = 0; channel < AFX_MAX_FLOW_CHANNELS; ++channel) if (active[channel]) {
@@ -526,7 +532,7 @@ static int assemble_output(const afx_c_zone_t *zones, uint32_t zone_count,
                            const afx_c_zone_t *bank_zones, uint32_t bank_zone_count,
                            const uint8_t *stream, uint32_t stream_bytes,
                            uint32_t channels, uint32_t tick_rate, int controlled, uint32_t loop_tick,
-                           afx_c_output_t *out) {
+                           int repeats, afx_c_output_t *out) {
     uint32_t *offsets = NULL, sample_bytes = 0;
     if (!zones || !zone_count || zone_count > UINT16_MAX ||
         !bank_zones || !bank_zone_count || bank_zone_count > UINT16_MAX || !stream || !stream_bytes ||
@@ -596,7 +602,8 @@ sample_known:;
     memcpy(setup + zone_count * AFX_SETUP_BYTES, stream, stream_bytes);
     uint32_t control_id = afx_control_id(setup, image_bytes);
     afx_write32(afx, AFX_FILE_MAGIC); afx_write32(afx + 4, AFX_FILE_VERSION); afx_write32(afx + 8, out->afx_bytes);
-    afx_write32(afx + 12, (controlled ? AFX_FLAG_CONTROLLED : AFX_FLAG_MUSIC) | (loop_tick != AFX_C_NO_LOOP ? AFX_FLAG_LOOP : 0));
+    afx_write32(afx + 12, (controlled ? AFX_FLAG_CONTROLLED : AFX_FLAG_MUSIC) |
+                          (loop_tick != AFX_C_NO_LOOP ? AFX_FLAG_LOOP : 0) | (repeats ? AFX_FLAG_REPEAT : 0));
     afx_write32(afx + 16, image_at); afx_write32(afx + 20, image_bytes);
     afx_write32(afx + 56, loop_tick != AFX_C_NO_LOOP ? loop_tick : 0);
     afx_write32(afx + 24, zone_count * AFX_SETUP_BYTES); afx_write32(afx + 28, stream_bytes); afx_write32(afx + 32, control_id);
@@ -604,15 +611,17 @@ sample_known:;
     afx_write32(afx + 48, AFX_HEADER); afx_write32(afx + 52, zone_count); afx_write32(afx + 64, channels);
     afx_write32(afx + 68, tick_rate); afx_write32(afx + 72, 1);
     if (afx_c_set_work_profile(afx, out->afx_bytes)) goto failed;
-    if (!controlled && (afx_c_build_seek(out, AFX_C_CHECKPOINT_SECONDS) || afx_c_visualize(out->afx, out->afx_bytes, &out->afv, &out->afv_bytes))) goto failed;
+    /* AICAflow cannot seek a flow with REPEAT, so it gets no checkpoints. */
+    if (!controlled && ((!repeats && afx_c_build_seek(out, AFX_C_CHECKPOINT_SECONDS)) ||
+                        afx_c_visualize(out->afx, out->afx_bytes, &out->afv, &out->afv_bytes))) goto failed;
     free(offsets); return 0;
 failed:
     free(offsets); afx_c_output_free(out); return -1;
 }
 
 static int compile_events(const afx_c_event_t *input, uint32_t count,
-                          uint32_t duration_ticks, uint32_t loop_tick, uint32_t tick_rate,
-                          const afx_c_zone_t *zones, uint32_t zone_count,
+                          uint32_t duration_ticks, uint32_t loop_tick, const afx_c_repeat_t *repeat,
+                          uint32_t tick_rate, const afx_c_zone_t *zones, uint32_t zone_count,
                           const afx_c_zone_t *bank_zones, uint32_t bank_zone_count,
                           afx_c_output_t *out);
 
@@ -685,7 +694,7 @@ int afx_c_compile_zones_loop(const afx_c_note_t *input, uint32_t count,
         }
     }
     if (afx_c_optimize_events(raw, 2u * count, zones, zone_count, &optimized, &templates, &template_count) ||
-        compile_events(optimized, 2u * count, final_end, loop_tick, tick_rate, templates, template_count,
+        compile_events(optimized, 2u * count, final_end, loop_tick, NULL, tick_rate, templates, template_count,
                        zones, zone_count, out)) goto failed;
     free(channels); free(notes); free(events); free(raw); free(optimized); free(templates); return 0;
 failed:
@@ -752,8 +761,8 @@ int afx_c_simplify_events(afx_c_event_t *events, uint32_t *count, const afx_c_si
 }
 
 static int compile_events(const afx_c_event_t *input, uint32_t count,
-                          uint32_t duration_ticks, uint32_t loop_tick, uint32_t tick_rate,
-                          const afx_c_zone_t *zones, uint32_t zone_count,
+                          uint32_t duration_ticks, uint32_t loop_tick, const afx_c_repeat_t *repeat,
+                          uint32_t tick_rate, const afx_c_zone_t *zones, uint32_t zone_count,
                           const afx_c_zone_t *bank_zones, uint32_t bank_zone_count,
                           afx_c_output_t *out) {
     afx_c_event_t *events = NULL;
@@ -761,45 +770,91 @@ static int compile_events(const afx_c_event_t *input, uint32_t count,
     /* The loop target: the stream offset of the instruction boundary at loop_tick. */
     uint32_t cursor = 0, previous = 0, channels = 0, commands = 0, writes = 0, loop_offset = UINT32_MAX;
     int loop = loop_tick != AFX_C_NO_LOOP;
+    /* A repeat's span on the stream timeline: its target boundary at from, the
+     * REPEAT at to, and the length its repeats add to the playback timeline. */
+    uint32_t from = UINT32_MAX, to = UINT32_MAX, repeat_offset = UINT32_MAX, shift = 0;
+    int repeat_done = 1;
     if (!out || !input || !count || !tick_rate || !zones || !zone_count ||
-        count > (UINT32_MAX - 16u) / 49u || (loop && loop_tick >= duration_ticks)) return -1;
+        count > (UINT32_MAX - 32u) / 49u) return -1;
     *out = (afx_c_output_t){0};
-    /* Per event at most 5 wait bytes + 44 event bytes; then the boundary wait,
-     * the final wait and the LOOP at the end. */
-    events = malloc(count * sizeof(*events)); stream = malloc(count * 49u + 16u);
+    if (repeat) {
+        uint64_t extra = (uint64_t)(repeat->to_tick - repeat->from_tick) * repeat->count;
+        if (repeat->from_tick >= repeat->to_tick || !repeat->count || repeat->count > 255u ||
+            repeat->to_tick + extra > duration_ticks) return -1;
+        from = repeat->from_tick; to = repeat->to_tick; shift = (uint32_t)extra; repeat_done = 0;
+        /* The playback timeline to the stream's: after the repeats, back by them. */
+        if (loop) {
+            if (loop_tick >= to && loop_tick < to + shift) return -1;
+            if (loop_tick >= to) loop_tick -= shift;
+        }
+        duration_ticks -= shift;
+    }
+    if (loop && loop_tick >= duration_ticks) return -1;
+    /* Per event at most 5 wait bytes + 44 event bytes; then the boundary waits,
+     * the REPEAT, the final wait and the LOOP at the end. */
+    events = malloc(count * sizeof(*events)); stream = malloc(count * 49u + 32u);
     if (!events || !stream) goto failed;
-    memcpy(events, input, count * sizeof(*events)); qsort(events, count, sizeof(*events), compare_control_event);
-    for (uint32_t i = 0; i < count; ++i) {
-        afx_c_event_t *source = &events[i];
-        uint32_t cost = 0;
-        if (source->tick > duration_ticks || (i && source->tick == events[i - 1].tick &&
-                                               source->order == events[i - 1].order) ||
-            source->channel >= AFX_MAX_FLOW_CHANNELS || (source->mask & ~AFX_FIELD_MASK)) goto failed;
-        if (source->opcode == AFX_OP_NOTE) {
-            if (source->setup >= zone_count) goto failed;
-            cost = NOTE_WRITES;
-        } else if (source->opcode == AFX_OP_PATCH) {
-            if (!source->mask) goto failed;
-            cost = afx_field_value_bytes(source->mask) / 2u;
-        } else if (source->opcode == AFX_OP_KEYOFF) {
-            if (source->mask) goto failed;
-            cost = 1;
-        } else if (source->opcode == AFX_OP_PARK) {
-            if (source->mask || !i || i + 1u != count || source->tick != duration_ticks || loop) goto failed;
-        } else goto failed;
-        /* Work beyond one executor pass continues in the next tick. Events keep
-         * their order, so everything behind a moved event moves with it. */
-        uint32_t tick = source->tick > previous ? source->tick : previous;
-        if (tick != previous) commands = writes = 0;
-        if (commands == AFX_EXECUTION_BUDGET_COMMANDS || cost > AFX_EXECUTION_BUDGET_WRITES - writes) {
-            if (tick == UINT32_MAX) goto failed;
-            ++tick; commands = writes = 0;
+    memcpy(events, input, count * sizeof(*events));
+    for (uint32_t i = 0; repeat && i < count; ++i) {
+        if (events[i].tick >= to && events[i].tick < to + shift) goto failed;
+        if (events[i].tick >= to) events[i].tick -= shift;
+    }
+    qsort(events, count, sizeof(*events), compare_control_event);
+    for (uint32_t i = 0; i <= count; ++i) {
+        afx_c_event_t *source = i < count ? &events[i] : NULL;
+        uint32_t cost = 0, tick = previous;
+        if (source) {
+            if (source->tick > duration_ticks || (i && source->tick == events[i - 1].tick &&
+                                                   source->order == events[i - 1].order) ||
+                source->channel >= AFX_MAX_FLOW_CHANNELS || (source->mask & ~AFX_FIELD_MASK)) goto failed;
+            if (source->opcode == AFX_OP_NOTE) {
+                if (source->setup >= zone_count) goto failed;
+                cost = NOTE_WRITES;
+            } else if (source->opcode == AFX_OP_PATCH) {
+                if (!source->mask) goto failed;
+                cost = afx_field_value_bytes(source->mask) / 2u;
+            } else if (source->opcode == AFX_OP_KEYOFF) {
+                if (source->mask) goto failed;
+                cost = 1;
+            } else if (source->opcode == AFX_OP_PARK) {
+                if (source->mask || !i || i + 1u != count || source->tick != duration_ticks || loop ||
+                    repeat) goto failed;
+            } else goto failed;
+            /* Work beyond one executor pass continues in the next tick. Events keep
+             * their order, so everything behind a moved event moves with it. */
+            tick = source->tick > previous ? source->tick : previous;
+            if (tick != previous) commands = writes = 0;
+            if (commands == AFX_EXECUTION_BUDGET_COMMANDS || cost > AFX_EXECUTION_BUDGET_WRITES - writes) {
+                if (tick == UINT32_MAX) goto failed;
+                ++tick; commands = writes = 0;
+            }
+            /* Moved across an end of the span, it would play a different number of times. */
+            if (repeat && ((source->tick < from && tick >= from) || (source->tick < to && tick >= to)))
+                goto failed;
+        } else {
+            if (events[count - 1u].opcode == AFX_OP_PARK) break;
+            /* After the last event: the boundaries still to come, before the end. */
+            tick = duration_ticks > previous ? duration_ticks : previous;
         }
-        if (loop && loop_offset == UINT32_MAX && loop_tick <= tick) {
-            /* The boundary the LOOP returns to: split the wait at the loop tick. */
-            cursor += encode_wait(stream + cursor, loop_tick - previous); previous = loop_tick;
-            loop_offset = cursor;
+        /* The boundaries at or before this tick, in tick order; at one tick the
+         * REPEAT first, so that a LOOP to that tick lands after it. */
+        for (;;) {
+            uint32_t next = UINT32_MAX;
+            if (!repeat_done && repeat_offset == UINT32_MAX && from <= tick) next = from;
+            if (!repeat_done && to <= tick && (next == UINT32_MAX || to < next)) next = to;
+            if (loop && loop_offset == UINT32_MAX && loop_tick <= tick && (next == UINT32_MAX || loop_tick < next))
+                next = loop_tick;
+            if (next == UINT32_MAX) break;
+            cursor += encode_wait(stream + cursor, next - previous); previous = next;
+            if (!repeat_done && repeat_offset == UINT32_MAX && next == from) repeat_offset = cursor;
+            else if (!repeat_done && next == to) {
+                afx_event_t wire = {.opcode = AFX_OP_REPEAT, .target = repeat_offset, .count = repeat->count};
+                uint32_t written = 0;
+                if (afx_encode_event(stream + cursor, 6u, &wire, NULL, &written)) goto failed;
+                cursor += written; repeat_done = 1;
+            } else loop_offset = cursor;
         }
+        if (!source) break;
         ++commands; writes += cost;
         cursor += encode_wait(stream + cursor, tick - previous); previous = tick;
         afx_event_t wire = {.opcode = source->opcode, .channel = source->channel,
@@ -808,23 +863,20 @@ static int compile_events(const afx_c_event_t *input, uint32_t count,
         uint16_t values[AFX_FIELD_COUNT]; uint32_t selected = 0, written = 0;
         for (uint32_t field = 0; field < AFX_FIELD_COUNT; ++field)
             if (source->mask & (1u << field)) values[selected++] = source->fields[field];
-        if (afx_encode_event(stream + cursor, count * 49u + 6u - cursor, &wire, values, &written)) goto failed;
+        if (afx_encode_event(stream + cursor, count * 49u + 32u - cursor, &wire, values, &written)) goto failed;
         cursor += written;
         if (source->channel + 1u > channels) channels = source->channel + 1u;
     }
     int controlled = events[count - 1u].opcode == AFX_OP_PARK;
     if (!controlled) {
-        if (loop && loop_offset == UINT32_MAX) {
-            cursor += encode_wait(stream + cursor, loop_tick - previous); previous = loop_tick;
-            loop_offset = cursor;
-        }
         /* A burst moved past the authored end still plays before END or LOOP. */
         if (duration_ticks > previous) cursor += encode_wait(stream + cursor, duration_ticks - previous);
         if (loop) { stream[cursor++] = AFX_OP_LOOP; afx_write32(stream + cursor, loop_offset); cursor += 4; }
         else stream[cursor++] = AFX_OP_END;
     }
     if (assemble_output(zones, zone_count, bank_zones, bank_zone_count,
-                        stream, cursor, channels, tick_rate, controlled, loop_tick, out)) goto failed;
+                        stream, cursor, channels, tick_rate, controlled, loop_tick, repeat != NULL, out))
+        goto failed;
     free(events); free(stream); return 0;
 failed:
     free(events); free(stream); afx_c_output_free(out); return -1;
@@ -834,14 +886,23 @@ int afx_c_compile_events(const afx_c_event_t *input, uint32_t count,
                          uint32_t duration_ticks, uint32_t tick_rate,
                          const afx_c_zone_t *zones, uint32_t zone_count,
                          afx_c_output_t *out) {
-    return compile_events(input, count, duration_ticks, AFX_C_NO_LOOP, tick_rate, zones, zone_count,
+    return compile_events(input, count, duration_ticks, AFX_C_NO_LOOP, NULL, tick_rate, zones, zone_count,
                           zones, zone_count, out);
 }
 int afx_c_compile_events_loop(const afx_c_event_t *input, uint32_t count,
                               uint32_t duration_ticks, uint32_t loop_tick, uint32_t tick_rate,
                               const afx_c_zone_t *zones, uint32_t zone_count,
                               afx_c_output_t *out) {
-    return compile_events(input, count, duration_ticks, loop_tick, tick_rate, zones, zone_count,
+    return compile_events(input, count, duration_ticks, loop_tick, NULL, tick_rate, zones, zone_count,
+                          zones, zone_count, out);
+}
+int afx_c_compile_events_repeat(const afx_c_event_t *input, uint32_t count,
+                                uint32_t duration_ticks, uint32_t loop_tick,
+                                const afx_c_repeat_t *repeat, uint32_t tick_rate,
+                                const afx_c_zone_t *zones, uint32_t zone_count,
+                                afx_c_output_t *out) {
+    if (!repeat) return -1;
+    return compile_events(input, count, duration_ticks, loop_tick, repeat, tick_rate, zones, zone_count,
                           zones, zone_count, out);
 }
 

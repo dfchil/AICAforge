@@ -160,6 +160,30 @@ int afx_c_compile_events_loop(const afx_c_event_t *events, uint32_t count,
                               const afx_c_zone_t *zones, uint32_t zone_count,
                               afx_c_output_t *out);
 
+/* A span of the playback timeline, [from_tick, to_tick), that plays `count`
+ * (1..255) more times right after itself. */
+typedef struct {
+    uint32_t from_tick, to_tick;
+    uint32_t count;
+} afx_c_repeat_t;
+/* As afx_c_compile_events_loop, storing a span that plays several times in a
+ * row once, followed by AICAflow's REPEAT (AFX_FLAG_REPEAT, firmware ABI 14).
+ * Events, duration_ticks and loop_tick are on the playback timeline: the
+ * span's events are given once, at their first play, and nothing falls in its
+ * repeated plays, [to_tick, to_tick + count * (to_tick - from_tick)); events
+ * after them keep their playback ticks, and the stream moves them back by the
+ * repeated length. loop_tick may fall in the first play of the span (a LOOP
+ * back into it plays it in full again before what follows), before it, or
+ * after its repeats; AFX_C_NO_LOOP compiles a finite flow. A tick's work that
+ * would move across from_tick or to_tick is refused, since it would change
+ * how often it plays. The flow gets no AFC (AICAflow cannot seek a flow with
+ * REPEAT); its AFV follows the repeats. A controlled flow cannot repeat. */
+int afx_c_compile_events_repeat(const afx_c_event_t *events, uint32_t count,
+                                uint32_t duration_ticks, uint32_t loop_tick,
+                                const afx_c_repeat_t *repeat, uint32_t tick_rate,
+                                const afx_c_zone_t *zones, uint32_t zone_count,
+                                afx_c_output_t *out);
+
 /* Compile a resolved timeline against one explicit sample. All output sidecars
  * are allocated with the AFB/AFX pair and released by afx_c_output_free(). */
 int afx_c_compile_sample(const afx_c_note_t *notes, uint32_t count,

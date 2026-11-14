@@ -191,6 +191,20 @@ rewritten stream); `afx_bank --merge` copies it unchanged. Seek checkpoints
 cover the first pass. The N64 CSeq importer still stops at an infinite compact
 loop; it does not emit LOOP yet.
 
+A section that plays several times in a row, such as A in a song of intro, A,
+A, B, can be stored once: `afx_c_compile_events_repeat()` takes an
+`afx_c_repeat_t` span (`from_tick`, `to_tick`, `count` more plays) and emits
+AICAflow's `REPEAT` after it (`AFX_FLAG_REPEAT`, firmware ABI 14). Its events,
+`duration_ticks` and `loop_tick` are on the playback timeline: give the span's
+events once, at their first play, nothing in its repeated plays, and the rest
+at their own ticks; the compiler moves what follows back by the repeated
+length. A loop tick inside the span's first play makes the LOOP play the rest
+of it and then the span again in full, as the source does. A tick's work that
+the execution budget would move across either end of the span is refused.
+Such a flow gets an AFV that follows the repeats but no AFC, since AICAflow
+cannot seek it, so `afx_profile` cannot apply a profile to it yet; `afx_bank
+--merge` copies it unchanged.
+
 ## Performance profiles
 
 `build/afx_profile init` creates an editable JSON `.afp` file from an
