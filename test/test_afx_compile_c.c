@@ -245,36 +245,115 @@ int main(void) {
         assert(notes_at[0] == 9 && notes_at[1] == 9 && notes_at[2] == 2 && keyoffs == 20 && tick == 30);
     }
     afx_c_output_free(&out);
-    /* A repeating flow ends with LOOP back to the instruction boundary at the
-       loop tick: inside a wait (5), on an event (10) and at the start (0). */
-    static const uint32_t loop_ticks[] = {5, 10, 0};
-    for (unsigned i = 0; i < 3; ++i) {
-        afx_file_header_t h;
+    /* Songs: intro, A, A, B, looping to the first A, every join a new play.
+       A's note rings 15 ticks past its 10-tick body: its tail. */
+    {
+        const afx_c_event_t note = {.opcode = AFX_OP_NOTE, .mask = AFX_NOTE_PL_MASK,
+                                    .fields = {[AFX_FIELD_PITCH] = 0x0800, [AFX_FIELD_MIX] = 0x3024}};
+        afx_c_event_t intro[2] = {note, {.tick = 4, .opcode = AFX_OP_KEYOFF}};
+        afx_c_event_t a[3] = {note, {.tick = 15, .opcode = AFX_OP_KEYOFF},
+                              {.tick = 15, .order = 1, .opcode = AFX_OP_FREE}};
+        afx_c_event_t b[2] = {note, {.tick = 6, .opcode = AFX_OP_KEYOFF}};
+        b[0].channel = 1;
+        b[1].channel = 1;
+        const afx_c_section_t sections[] = {
+            {intro, 2, 5, 5, AFX_JOIN_NEW}, {a, 3, 10, 16, AFX_JOIN_NEW}, {b, 2, 8, 8, AFX_JOIN_NEW},
+        };
+        const uint16_t order[] = {0, 1, 1, 2};
+        afx_song_header_t h;
         afx_validation_profile_t work;
-        assert(!afx_c_compile_events_loop(trace_events, 3, 30, loop_ticks[i], 1000, trace_zone, 1, &out));
-        assert(afx_file_validate_profile(out.afx, out.afx_bytes, &h, &work) == AFX_OK);
-        assert((h.flags & AFX_FLAG_LOOP) && h.loop_tick == loop_ticks[i]);
+        uint32_t channels, voices;
+        assert(!afx_c_compile_song(sections, 3, order, 4, 1, 1000, trace_zone, 1, &out));
+        assert(out.afm && out.afb && !out.afx && !out.afc && !out.afv);
+        assert(afx_song_validate_profile(out.afm, out.afm_bytes, &h, &work) == AFX_OK);
+        assert(afx_song_measure(out.afm, out.afm_bytes, NULL, &channels, &voices) == AFX_OK);
+        /* A's note and the next play's at each A join: two voices; B uses channel 1. */
+        assert(h.channels == 2 && channels == 2 && h.voices == voices && voices == 2);
         assert(h.work_profile == AFX_WORK_PROFILE(work.peak_commands, work.peak_register_writes));
-        const uint8_t *stream = out.afx + h.image_offset + h.stream_offset;
-        assert(stream[h.stream_size - 5] == AFX_OP_LOOP);
-        uint32_t target = afx_read32(stream + h.stream_size - 4), cursor = 0, tick = 0;
-        while (cursor < target) {
+        assert(h.bank_id_low == afx_read32(out.afb + 8) && !out.moved_events);
+        /* A's stream: NOTE, WAIT 10, NEXT new, WAIT 5, KEYOFF, FREE, WAIT 1, END. */
+        afx_song_image_header_t ih;
+        assert(afx_song_validate_layout(out.afm, out.afm_bytes, NULL, &ih) == AFX_OK);
+        const uint8_t *image = out.afm + h.image_offset;
+        afx_song_section_t sa = afx_song_section(image, &ih, 1);
+        assert(sa.body_ticks == 10 && ih.order_count == 4 && ih.loop_index == 1);
+        static const uint8_t want_ops[] = {AFX_OP_NOTE, AFX_OP_WAIT8, AFX_OP_NEXT, AFX_OP_WAIT8,
+                                           AFX_OP_KEYOFF, AFX_OP_FREE, AFX_OP_WAIT8, AFX_OP_END};
+        for (uint32_t at = sa.stream_offset, i = 0; at < sa.stream_offset + sa.stream_size; ++i) {
             afx_event_t event;
-            assert(afx_decode_event(stream + cursor, h.stream_size - cursor, &event) == AFX_OK);
-            if (event.opcode >= AFX_OP_WAIT8 && event.opcode <= AFX_OP_WAIT32) tick += event.wait;
-            cursor += event.bytes;
+            assert(afx_decode_event(image + at, sa.stream_offset + sa.stream_size - at, &event) == AFX_OK);
+            assert(i < sizeof(want_ops) && event.opcode == (want_ops[i] == AFX_OP_NOTE ? AFX_OP_NOTE : want_ops[i]));
+            at += event.bytes;
         }
-        assert(cursor == target && tick == loop_ticks[i]);
-        assert(out.afc && out.afv); /* Still a song: seek and visual sidecars. */
+        afx_c_output_free(&out);
+        /* The join: 30 key-offs ring past A's body, into the tick a head of 9
+           notes (171 writes) fills: they move later, and the move is reported. */
+        afx_c_event_t crowded[40], head[9];
+        for (uint32_t i = 0; i < 30; ++i)
+            crowded[i] = (afx_c_event_t){.tick = 10, .order = i, .opcode = AFX_OP_KEYOFF, .channel = (uint8_t)i};
+        for (uint32_t i = 0; i < 9; ++i) {
+            head[i] = note;
+            head[i].order = i;
+            head[i].channel = (uint8_t)i;
+        }
+        const afx_c_section_t busy[] = {{crowded, 30, 10, 12, AFX_JOIN_NEW}, {head, 9, 20, 20, AFX_JOIN_NEW}};
+        const uint16_t busy_order[] = {0, 1};
+        assert(!afx_c_compile_song(busy, 2, busy_order, 2, AFX_C_SONG_ENDS, 1000, trace_zone, 1, &out));
+        assert(afx_song_validate_profile(out.afm, out.afm_bytes, &h, &work) == AFX_OK);
+        assert(work.peak_register_writes <= AFX_EXECUTION_BUDGET_WRITES && out.moved_events == 30 &&
+               out.moved_ticks == 30);
+        afx_c_output_free(&out);
+        /* Refused: a continue join with a tail, a body pushed across its join, a
+           tail still playing at the next new-play join, a bad order or loop. */
+        const afx_c_section_t tailed_continue[] = {{a, 3, 10, 16, AFX_JOIN_CONTINUE}};
+        const uint16_t once[] = {0};
+        assert(afx_c_compile_song(tailed_continue, 1, once, 1, 0, 1000, trace_zone, 1, &out));
+        afx_c_event_t pushed[40];
+        for (uint32_t i = 0; i < 40; ++i)
+            pushed[i] = (afx_c_event_t){.tick = 9, .order = i, .opcode = AFX_OP_KEYOFF, .channel = (uint8_t)i};
+        const afx_c_section_t across[] = {{pushed, 40, 10, 10, AFX_JOIN_NEW}};
+        assert(afx_c_compile_song(across, 1, once, 1, AFX_C_SONG_ENDS, 1000, trace_zone, 1, &out));
+        const afx_c_section_t long_tail[] = {{a, 3, 10, 30, AFX_JOIN_NEW}};
+        const uint16_t again[] = {0, 0};
+        assert(afx_c_compile_song(long_tail, 1, again, 2, 0, 1000, trace_zone, 1, &out));
+        const uint16_t past[] = {0, 3};
+        assert(afx_c_compile_song(sections, 3, past, 2, 0, 1000, trace_zone, 1, &out));
+        assert(afx_c_compile_song(sections, 3, order, 4, 4, 1000, trace_zone, 1, &out));
+        afx_c_event_t parked[2] = {note, {.tick = 10, .opcode = AFX_OP_PARK}};
+        const afx_c_section_t park[] = {{parked, 2, 10, 10, AFX_JOIN_NEW}};
+        assert(afx_c_compile_song(park, 1, once, 1, AFX_C_SONG_ENDS, 1000, trace_zone, 1, &out));
+        /* Lanes: one per local channel the song uses. */
+        const uint8_t lanes[] = {2, 5};
+        assert(!afx_c_compile_song_lanes(sections, 3, order, 4, 1, lanes, 2, 1000, trace_zone, 1, &out));
+        assert(afx_song_validate(out.afm, out.afm_bytes, &h) == AFX_OK && (h.flags & AFX_FLAG_LANES));
+        afx_c_output_free(&out);
+        assert(afx_c_compile_song_lanes(sections, 3, order, 4, 1, lanes, 1, 1000, trace_zone, 1, &out));
+    }
+    /* afx_c_compile_zones_song: a MIDI timeline that repeats from a loop tick
+       becomes a continue-only song, intro then body; zero makes it all body. */
+    {
+        const afx_c_note_t notes[] = {
+            {.start_tick = 0, .end_tick = 600, .key = 60, .velocity = 100},
+            {.start_tick = 500, .end_tick = 1500, .key = 64, .velocity = 100},
+            {.start_tick = 1200, .end_tick = 2000, .key = 67, .velocity = 100},
+        };
+        const afx_c_zone_t zone = {.sample = one_shot, .key_max = 127, .velocity_max = 127};
+        afx_song_header_t h;
+        afx_song_image_header_t ih;
+        static const uint32_t loop_ticks[] = {1000, 0};
+        for (unsigned i = 0; i < 2; ++i) {
+            assert(!afx_c_compile_zones_song(notes, 3, 1000, loop_ticks[i], &zone, 1, &out));
+            assert(out.afm && afx_song_validate(out.afm, out.afm_bytes, &h) == AFX_OK && !h.voices);
+            assert(afx_song_validate_layout(out.afm, out.afm_bytes, NULL, &ih) == AFX_OK);
+            assert(ih.section_count == (i ? 1u : 2u) && ih.loop_index == (i ? 0u : 1u));
+            afx_song_section_t body = afx_song_section(out.afm + h.image_offset, &ih, ih.section_count - 1u);
+            assert(body.body_ticks == 2000 - loop_ticks[i]);
+            afx_c_output_free(&out);
+        }
+        assert(afx_c_compile_zones_song(notes, 3, 1000, 2000, &zone, 1, &out));
+        assert(!afx_c_compile_zones_song(notes, 3, 1000, AFX_C_NO_LOOP, &zone, 1, &out) && out.afx && !out.afm);
         afx_c_output_free(&out);
     }
-    /* The loop tick must lie before the end, and a controlled flow cannot loop. */
-    assert(afx_c_compile_events_loop(trace_events, 3, 30, 30, 1000, trace_zone, 1, &out));
-    const afx_c_event_t parked[] = {trace_events[0], trace_events[1], trace_events[2],
-        {.tick = 30, .order = 1, .opcode = AFX_OP_PARK}};
-    assert(afx_c_compile_events_loop(parked, 4, 30, 0, 1000, trace_zone, 1, &out));
-    assert(!afx_c_compile_events(parked, 4, 30, 1000, trace_zone, 1, &out));
-    afx_c_output_free(&out);
     /* A release tail occupies its channel, but KEYOFF remains at the musical
        note end.  This is how the offline bank builder preserves an SF2
        release without inventing an ARM7-specific command. */

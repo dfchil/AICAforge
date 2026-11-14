@@ -294,7 +294,8 @@ static int valid_sample(const afx_c_sample_t *sample) {
 
 void afx_c_output_free(afx_c_output_t *out) {
     if (!out) return;
-    free(out->afb); free(out->afx); free(out->afc); free(out->afv); *out = (afx_c_output_t){0};
+    free(out->afb); free(out->afx); free(out->afc); free(out->afv); free(out->afm);
+    *out = (afx_c_output_t){0};
 }
 
 static int seek_grow(uint8_t **data, uint32_t *capacity, uint32_t used, uint32_t add) {
@@ -522,19 +523,16 @@ int afx_c_set_work_profile(uint8_t *afx, uint32_t bytes) {
     return 0;
 }
 
-static int assemble_output(const afx_c_zone_t *zones, uint32_t zone_count,
-                           const afx_c_zone_t *bank_zones, uint32_t bank_zone_count,
-                           const uint8_t *stream, uint32_t stream_bytes,
-                           uint32_t channels, uint32_t tick_rate, int controlled, uint32_t loop_tick,
-                           afx_c_output_t *out) {
+/* The AFB of bank_zones, in source-zone order, 32-byte aligned, identical
+ * data shared; offsets gets each zone's byte offset in it. */
+static int assemble_bank(const afx_c_zone_t *bank_zones, uint32_t bank_zone_count,
+                         afx_c_output_t *out, uint32_t **offsets_out) {
     uint32_t *offsets = NULL, sample_bytes = 0;
-    if (!zones || !zone_count || zone_count > UINT16_MAX ||
-        !bank_zones || !bank_zone_count || bank_zone_count > UINT16_MAX || !stream || !stream_bytes ||
-        !channels || channels > AFX_MAX_FLOW_CHANNELS || !tick_rate || !out) return -1;
+    if (!bank_zones || !bank_zone_count || bank_zone_count > UINT16_MAX) return -1;
     /* AFB/AFI layout follows the source zones, independently of the optimized
        setup dictionary. Songs sharing these zones must get identical banks. */
     offsets = malloc(bank_zone_count * sizeof(*offsets));
-    if (!offsets) goto failed;
+    if (!offsets) return -1;
     for (uint32_t i = 0; i < bank_zone_count; ++i) {
         if (bank_zones[i].key_min > bank_zones[i].key_max ||
             bank_zones[i].velocity_min > bank_zones[i].velocity_max ||
@@ -563,22 +561,26 @@ sample_known:;
     afx_write32(out->afb + 8, bank_id); afx_write32(out->afb + 12, hash32_alt(out->afb + AFB_HEADER, sample_bytes));
     afx_write32(out->afb + 16, AFB_HEADER); afx_write32(out->afb + 20, sample_bytes);
     afx_write32(out->afb + 24, out->afb_bytes);
-    uint32_t image_at = align32(AFX_HEADER + zone_count * RELOCATION_BYTES);
-    if (stream_bytes > UINT32_MAX - zone_count * AFX_SETUP_BYTES) goto failed;
-    uint32_t image_bytes = zone_count * AFX_SETUP_BYTES + stream_bytes;
-    if (image_bytes > UINT32_MAX - image_at) goto failed;
-    out->afx_bytes = image_at + image_bytes; out->afx = calloc(1, out->afx_bytes);
-    if (!out->afx) goto failed;
-    uint8_t *afx = out->afx, *setup = afx + image_at;
+    *offsets_out = offsets;
+    return 0;
+failed:
+    free(offsets); return -1;
+}
+/* The setups of zones, as register templates whose samples are at their bank
+ * zone's offset, and a relocation for each; setup_at is their image offset. */
+static int write_setups(const afx_c_zone_t *zones, uint32_t zone_count,
+                        const afx_c_zone_t *bank_zones, uint32_t bank_zone_count,
+                        const uint32_t *offsets, uint8_t *image, uint32_t setup_at, uint8_t *relocations) {
+    uint8_t *setup = image + setup_at;
     for (uint32_t i = 0; i < zone_count; ++i) {
         uint32_t sample = 0;
         while (sample < bank_zone_count &&
                (zones[i].sample.data != bank_zones[sample].sample.data ||
                 zones[i].sample.bytes != bank_zones[sample].sample.bytes)) ++sample;
-        if (sample == bank_zone_count) goto failed;
+        if (sample == bank_zone_count) return -1;
         uint8_t *state = setup + i * AFX_SETUP_BYTES;
         uint32_t address = offsets[sample];
-        if (address > 0x7fffffu) goto failed;
+        if (address > 0x7fffffu) return -1;
         afx_write16(state, (zones[i].sample.loop ? 0x0200 : 0) |
                     ((uint16_t)zones[i].sample.format << 7) | (address >> 16));
         afx_write16(state + 2, address);
@@ -589,18 +591,38 @@ sample_known:;
         for (uint32_t field = 11; field < 16; ++field) afx_write16(state + 2 * field, 0x1fffu);
         for (uint32_t field = 4; field < AFX_FIELD_COUNT; ++field)
             if (zones[i].setup_mask & (1u << field)) afx_write16(state + 2 * field, zones[i].setup[field]);
-        uint8_t *relocation = afx + AFX_HEADER + i * RELOCATION_BYTES;
-        afx_write32(relocation, i * AFX_SETUP_BYTES); afx_write32(relocation + 4, address);
+        uint8_t *relocation = relocations + i * RELOCATION_BYTES;
+        afx_write32(relocation, setup_at + i * AFX_SETUP_BYTES); afx_write32(relocation + 4, address);
         afx_write32(relocation + 8, zones[i].sample.bytes);
     }
+    return 0;
+}
+static int assemble_output(const afx_c_zone_t *zones, uint32_t zone_count,
+                           const afx_c_zone_t *bank_zones, uint32_t bank_zone_count,
+                           const uint8_t *stream, uint32_t stream_bytes,
+                           uint32_t channels, uint32_t tick_rate, int controlled,
+                           afx_c_output_t *out) {
+    uint32_t *offsets = NULL;
+    if (!zones || !zone_count || zone_count > UINT16_MAX ||
+        !bank_zones || !bank_zone_count || bank_zone_count > UINT16_MAX || !stream || !stream_bytes ||
+        !channels || channels > AFX_MAX_FLOW_CHANNELS || !tick_rate || !out) return -1;
+    if (assemble_bank(bank_zones, bank_zone_count, out, &offsets)) goto failed;
+    uint32_t image_at = align32(AFX_HEADER + zone_count * RELOCATION_BYTES);
+    if (stream_bytes > UINT32_MAX - zone_count * AFX_SETUP_BYTES) goto failed;
+    uint32_t image_bytes = zone_count * AFX_SETUP_BYTES + stream_bytes;
+    if (image_bytes > UINT32_MAX - image_at) goto failed;
+    out->afx_bytes = image_at + image_bytes; out->afx = calloc(1, out->afx_bytes);
+    if (!out->afx) goto failed;
+    uint8_t *afx = out->afx, *setup = afx + image_at;
+    if (write_setups(zones, zone_count, bank_zones, bank_zone_count, offsets, setup, 0, afx + AFX_HEADER))
+        goto failed;
     memcpy(setup + zone_count * AFX_SETUP_BYTES, stream, stream_bytes);
     uint32_t control_id = afx_control_id(setup, image_bytes);
     afx_write32(afx, AFX_FILE_MAGIC); afx_write32(afx + 4, AFX_FILE_VERSION); afx_write32(afx + 8, out->afx_bytes);
-    afx_write32(afx + 12, (controlled ? AFX_FLAG_CONTROLLED : AFX_FLAG_MUSIC) | (loop_tick != AFX_C_NO_LOOP ? AFX_FLAG_LOOP : 0));
+    afx_write32(afx + 12, controlled ? AFX_FLAG_CONTROLLED : AFX_FLAG_MUSIC);
     afx_write32(afx + 16, image_at); afx_write32(afx + 20, image_bytes);
-    afx_write32(afx + 56, loop_tick != AFX_C_NO_LOOP ? loop_tick : 0);
     afx_write32(afx + 24, zone_count * AFX_SETUP_BYTES); afx_write32(afx + 28, stream_bytes); afx_write32(afx + 32, control_id);
-    afx_write32(afx + 36, zone_count); afx_write32(afx + 40, bank_id); afx_write32(afx + 44, afx_read32(out->afb + 12));
+    afx_write32(afx + 36, zone_count); afx_write32(afx + 40, afx_read32(out->afb + 8)); afx_write32(afx + 44, afx_read32(out->afb + 12));
     afx_write32(afx + 48, AFX_HEADER); afx_write32(afx + 52, zone_count); afx_write32(afx + 64, channels);
     afx_write32(afx + 68, tick_rate); afx_write32(afx + 72, 1);
     if (afx_c_set_work_profile(afx, out->afx_bytes)) goto failed;
@@ -611,17 +633,25 @@ failed:
 }
 
 static int compile_events(const afx_c_event_t *input, uint32_t count,
-                          uint32_t duration_ticks, uint32_t loop_tick, uint32_t tick_rate,
+                          uint32_t duration_ticks, uint32_t tick_rate,
                           const afx_c_zone_t *zones, uint32_t zone_count,
                           const afx_c_zone_t *bank_zones, uint32_t bank_zone_count,
                           afx_c_output_t *out);
+static int compile_song(const afx_c_section_t *sections, uint32_t section_count,
+                        const uint16_t *order, uint32_t order_count, uint32_t loop_index,
+                        const uint8_t *lanes, uint32_t lane_channels, uint32_t tick_rate,
+                        const afx_c_zone_t *zones, uint32_t zone_count,
+                        const afx_c_zone_t *bank_zones, uint32_t bank_zone_count,
+                        afx_c_output_t *out);
 
 int afx_c_compile_zones(const afx_c_note_t *input, uint32_t count,
                         uint32_t tick_rate, const afx_c_zone_t *zones,
                         uint32_t zone_count, afx_c_output_t *out) {
-    return afx_c_compile_zones_loop(input, count, tick_rate, AFX_C_NO_LOOP, zones, zone_count, out);
+    return afx_c_compile_zones_song(input, count, tick_rate, AFX_C_NO_LOOP, zones, zone_count, out);
 }
-int afx_c_compile_zones_loop(const afx_c_note_t *input, uint32_t count,
+/* A flow of the notes, or with a loop tick a song of an intro and a body
+ * joined by continue joins (see afx_c_compile_zones_song). */
+int afx_c_compile_zones_song(const afx_c_note_t *input, uint32_t count,
                              uint32_t tick_rate, uint32_t loop_tick, const afx_c_zone_t *zones,
                              uint32_t zone_count, afx_c_output_t *out) {
     if (!out || !input || !count || !tick_rate || !zones || !zone_count || zone_count > UINT16_MAX)
@@ -684,9 +714,28 @@ int afx_c_compile_zones_loop(const afx_c_note_t *input, uint32_t count,
             raw[i].fields[AFX_FIELD_MIX] = events[i].mix ? events[i].mix : level(events[i].velocity);
         }
     }
-    if (afx_c_optimize_events(raw, 2u * count, zones, zone_count, &optimized, &templates, &template_count) ||
-        compile_events(optimized, 2u * count, final_end, loop_tick, tick_rate, templates, template_count,
-                       zones, zone_count, out)) goto failed;
+    if (afx_c_optimize_events(raw, 2u * count, zones, zone_count, &optimized, &templates, &template_count))
+        goto failed;
+    if (loop_tick == AFX_C_NO_LOOP) {
+        if (compile_events(optimized, 2u * count, final_end, tick_rate, templates, template_count,
+                           zones, zone_count, out)) goto failed;
+    } else {
+        /* The intro before the loop tick, the body from it, both continuing:
+         * the body's events in ticks from the loop tick. */
+        if (loop_tick >= final_end) goto failed;
+        uint32_t intro = 0;
+        while (intro < 2u * count && optimized[intro].tick < loop_tick) ++intro;
+        for (uint32_t i = intro; i < 2u * count; ++i) optimized[i].tick -= loop_tick;
+        afx_c_section_t sections[2] = {
+            {optimized, intro, loop_tick, loop_tick, AFX_JOIN_CONTINUE},
+            {optimized + intro, 2u * count - intro, final_end - loop_tick, final_end - loop_tick,
+             AFX_JOIN_CONTINUE},
+        };
+        static const uint16_t order[2] = {0, 1};
+        int first = loop_tick ? 0 : 1;
+        if (compile_song(sections + first, 2u - first, order, 2u - first, 1u - first, NULL, 0, tick_rate,
+                         templates, template_count, zones, zone_count, out)) goto failed;
+    }
     free(channels); free(notes); free(events); free(raw); free(optimized); free(templates); return 0;
 failed:
     free(channels); free(notes); free(events); free(raw); free(optimized); free(templates);
@@ -752,17 +801,15 @@ int afx_c_simplify_events(afx_c_event_t *events, uint32_t *count, const afx_c_si
 }
 
 static int compile_events(const afx_c_event_t *input, uint32_t count,
-                          uint32_t duration_ticks, uint32_t loop_tick, uint32_t tick_rate,
+                          uint32_t duration_ticks, uint32_t tick_rate,
                           const afx_c_zone_t *zones, uint32_t zone_count,
                           const afx_c_zone_t *bank_zones, uint32_t bank_zone_count,
                           afx_c_output_t *out) {
     afx_c_event_t *events = NULL;
     uint8_t *stream = NULL;
-    /* The loop target: the stream offset of the instruction boundary at loop_tick. */
-    uint32_t cursor = 0, previous = 0, channels = 0, commands = 0, writes = 0, loop_offset = UINT32_MAX;
-    int loop = loop_tick != AFX_C_NO_LOOP;
+    uint32_t cursor = 0, previous = 0, channels = 0, commands = 0, writes = 0;
     if (!out || !input || !count || !tick_rate || !zones || !zone_count ||
-        count > (UINT32_MAX - 16u) / 49u || (loop && loop_tick >= duration_ticks)) return -1;
+        count > (UINT32_MAX - 16u) / 49u) return -1;
     *out = (afx_c_output_t){0};
     /* Per event at most 5 wait bytes + 44 event bytes; then the boundary wait,
      * the final wait and the LOOP at the end. */
@@ -785,7 +832,7 @@ static int compile_events(const afx_c_event_t *input, uint32_t count,
             if (source->mask) goto failed;
             cost = 1;
         } else if (source->opcode == AFX_OP_PARK) {
-            if (source->mask || !i || i + 1u != count || source->tick != duration_ticks || loop) goto failed;
+            if (source->mask || !i || i + 1u != count || source->tick != duration_ticks) goto failed;
         } else goto failed;
         /* Work beyond one executor pass continues in the next tick. Events keep
          * their order, so everything behind a moved event moves with it. */
@@ -794,11 +841,6 @@ static int compile_events(const afx_c_event_t *input, uint32_t count,
         if (commands == AFX_EXECUTION_BUDGET_COMMANDS || cost > AFX_EXECUTION_BUDGET_WRITES - writes) {
             if (tick == UINT32_MAX) goto failed;
             ++tick; commands = writes = 0;
-        }
-        if (loop && loop_offset == UINT32_MAX && loop_tick <= tick) {
-            /* The boundary the LOOP returns to: split the wait at the loop tick. */
-            cursor += encode_wait(stream + cursor, loop_tick - previous); previous = loop_tick;
-            loop_offset = cursor;
         }
         ++commands; writes += cost;
         cursor += encode_wait(stream + cursor, tick - previous); previous = tick;
@@ -814,34 +856,278 @@ static int compile_events(const afx_c_event_t *input, uint32_t count,
     }
     int controlled = events[count - 1u].opcode == AFX_OP_PARK;
     if (!controlled) {
-        if (loop && loop_offset == UINT32_MAX) {
-            cursor += encode_wait(stream + cursor, loop_tick - previous); previous = loop_tick;
-            loop_offset = cursor;
-        }
         /* A burst moved past the authored end still plays before END or LOOP. */
         if (duration_ticks > previous) cursor += encode_wait(stream + cursor, duration_ticks - previous);
-        if (loop) { stream[cursor++] = AFX_OP_LOOP; afx_write32(stream + cursor, loop_offset); cursor += 4; }
-        else stream[cursor++] = AFX_OP_END;
+        stream[cursor++] = AFX_OP_END;
     }
     if (assemble_output(zones, zone_count, bank_zones, bank_zone_count,
-                        stream, cursor, channels, tick_rate, controlled, loop_tick, out)) goto failed;
+                        stream, cursor, channels, tick_rate, controlled, out)) goto failed;
     free(events); free(stream); return 0;
 failed:
     free(events); free(stream); afx_c_output_free(out); return -1;
+}
+
+/* Songs. A section's events, sorted and scheduled: sched holds each event's
+ * tick after budget moves. head lists the work of the ticks its body events
+ * use, for the tails of the sections a new-play join leads from. */
+typedef struct { uint32_t tick, commands, writes; } tick_work_t;
+typedef struct {
+    afx_c_event_t *events;
+    uint32_t *sched;
+    uint32_t count, body_count; /* Events before the NEXT, then the tail. */
+    tick_work_t *head;
+    uint32_t head_count;
+} song_section_t;
+
+static uint32_t event_cost(const afx_c_event_t *event) {
+    if (event->opcode == AFX_OP_NOTE) return NOTE_WRITES;
+    if (event->opcode == AFX_OP_PATCH) return afx_field_value_bytes(event->mask) / 2u;
+    return 1; /* KEYOFF, FREE */
+}
+/* The work at tick in a section's head (zero where it has none). */
+static void head_work(const song_section_t *section, uint32_t tick, uint32_t *commands, uint32_t *writes) {
+    uint32_t low = 0, high = section->head_count;
+    *commands = *writes = 0;
+    while (low < high) {
+        uint32_t mid = (low + high) / 2u;
+        if (section->head[mid].tick < tick) low = mid + 1u; else high = mid;
+    }
+    if (low < section->head_count && section->head[low].tick == tick) {
+        *commands = section->head[low].commands;
+        *writes = section->head[low].writes;
+    }
+}
+/* Sorts and checks a section's events and schedules its body: events before
+ * body_ticks (through it, for a continue join) at the per-tick budget, none
+ * moved past it. */
+static int song_section_body(const afx_c_section_t *source, uint32_t zone_count, song_section_t *section) {
+    int keep_join_tick = source->join == AFX_JOIN_CONTINUE;
+    if (!source->body_ticks || source->end_ticks < source->body_ticks || source->join > AFX_JOIN_CONTINUE ||
+        (source->count && !source->events) || source->count > (UINT32_MAX - 64u) / 49u ||
+        (keep_join_tick && source->end_ticks != source->body_ticks)) return -1;
+    section->count = source->count;
+    section->events = malloc((source->count ? source->count : 1u) * sizeof(*section->events));
+    section->sched = malloc((source->count ? source->count : 1u) * sizeof(*section->sched));
+    section->head = malloc((source->count ? source->count : 1u) * sizeof(*section->head));
+    if (!section->events || !section->sched || !section->head) return -1;
+    if (source->count) memcpy(section->events, source->events, source->count * sizeof(*section->events));
+    qsort(section->events, source->count, sizeof(*section->events), compare_control_event);
+    uint32_t previous = 0, commands = 0, writes = 0;
+    section->body_count = 0;
+    for (uint32_t i = 0; i < source->count; ++i) {
+        const afx_c_event_t *event = &section->events[i];
+        if ((i && event->tick == section->events[i - 1].tick && event->order == section->events[i - 1].order) ||
+            event->channel >= AFX_MAX_FLOW_CHANNELS || (event->mask & ~AFX_FIELD_MASK)) return -1;
+        if (event->opcode == AFX_OP_NOTE) { if (event->setup >= zone_count) return -1; }
+        else if (event->opcode == AFX_OP_PATCH) { if (!event->mask) return -1; }
+        else if (event->opcode == AFX_OP_KEYOFF || event->opcode == AFX_OP_FREE) { if (event->mask) return -1; }
+        else return -1;
+        int body = keep_join_tick ? event->tick <= source->body_ticks : event->tick < source->body_ticks;
+        if (keep_join_tick && !body) return -1; /* A continue join has no tail. */
+        if (!body) continue;
+        uint32_t cost = event_cost(event);
+        uint32_t tick = event->tick > previous ? event->tick : previous;
+        if (tick != previous) commands = writes = 0;
+        if (commands == AFX_EXECUTION_BUDGET_COMMANDS || cost > AFX_EXECUTION_BUDGET_WRITES - writes) {
+            ++tick; commands = writes = 0;
+        }
+        /* Moved across the join, the body would change how the sections meet. */
+        if (keep_join_tick ? tick > source->body_ticks : tick >= source->body_ticks) return -1;
+        ++commands; writes += cost; previous = tick;
+        section->sched[i] = tick;
+        section->body_count = i + 1u;
+        if (section->head_count && section->head[section->head_count - 1u].tick == tick) {
+            section->head[section->head_count - 1u].commands = commands;
+            section->head[section->head_count - 1u].writes = writes;
+        } else section->head[section->head_count++] = (tick_work_t){tick, commands, writes};
+    }
+    return 0;
+}
+/* Schedules a new-play section's tail: wherever its events and the first
+ * events of a section it leads to would together pass the budget, they move
+ * later by whole ticks. */
+static int song_section_tail(const afx_c_section_t *source, song_section_t *section,
+                             const song_section_t *sections, const uint8_t *next, uint32_t section_count,
+                             afx_c_output_t *out) {
+    uint32_t previous = 0, commands = 0, writes = 0;
+    for (uint32_t i = section->body_count; i < section->count; ++i) {
+        const afx_c_event_t *event = &section->events[i];
+        uint32_t cost = event_cost(event);
+        uint32_t tick = event->tick > previous ? event->tick : previous;
+        if (tick != previous) commands = writes = 0;
+        for (;;) {
+            /* This tick's tail work so far, with the busiest head it meets. */
+            uint32_t head_commands = 0, head_writes = 0;
+            for (uint32_t t = 0; t < section_count; ++t) {
+                if (!next[t]) continue;
+                uint32_t c, w;
+                head_work(&sections[t], tick - source->body_ticks, &c, &w);
+                if (c > head_commands) head_commands = c;
+                if (w > head_writes) head_writes = w;
+            }
+            uint32_t used_commands = commands + head_commands, used_writes = writes + head_writes;
+            if (used_commands < AFX_EXECUTION_BUDGET_COMMANDS && used_writes <= AFX_EXECUTION_BUDGET_WRITES &&
+                cost <= AFX_EXECUTION_BUDGET_WRITES - used_writes)
+                break;
+            if (tick == UINT32_MAX) return -1;
+            ++tick; commands = writes = 0;
+        }
+        if (tick > event->tick) { ++out->moved_events; out->moved_ticks += tick - event->tick; }
+        ++commands; writes += cost; previous = tick;
+        section->sched[i] = tick;
+    }
+    return 0;
+}
+/* The stream: the body, NEXT at body_ticks, the tail, END. */
+static uint32_t song_section_stream(const afx_c_section_t *source, const song_section_t *section, uint8_t *stream) {
+    uint32_t cursor = 0, previous = 0;
+    for (uint32_t i = 0; i < section->count; ++i) {
+        if (i == section->body_count) {
+            cursor += encode_wait(stream + cursor, source->body_ticks - previous); previous = source->body_ticks;
+            stream[cursor++] = AFX_OP_NEXT; stream[cursor++] = (uint8_t)source->join;
+        }
+        const afx_c_event_t *event = &section->events[i];
+        cursor += encode_wait(stream + cursor, section->sched[i] - previous); previous = section->sched[i];
+        afx_event_t wire = {.opcode = afx_compact_opcode(event->opcode, event->mask), .channel = event->channel,
+                            .setup = event->setup, .mask = event->mask};
+        uint16_t values[AFX_FIELD_COUNT]; uint32_t selected = 0, written = 0;
+        for (uint32_t field = 0; field < AFX_FIELD_COUNT; ++field)
+            if (event->mask & (1u << field)) values[selected++] = event->fields[field];
+        if (afx_encode_event(stream + cursor, 64u, &wire, values, &written)) return 0;
+        cursor += written;
+    }
+    if (section->body_count == section->count) {
+        cursor += encode_wait(stream + cursor, source->body_ticks - previous); previous = source->body_ticks;
+        stream[cursor++] = AFX_OP_NEXT; stream[cursor++] = (uint8_t)source->join;
+    }
+    if (source->end_ticks > previous) cursor += encode_wait(stream + cursor, source->end_ticks - previous);
+    stream[cursor++] = AFX_OP_END;
+    return cursor;
+}
+
+static int compile_song(const afx_c_section_t *sections, uint32_t section_count,
+                        const uint16_t *order, uint32_t order_count, uint32_t loop_index,
+                        const uint8_t *lanes, uint32_t lane_channels, uint32_t tick_rate,
+                        const afx_c_zone_t *zones, uint32_t zone_count,
+                        const afx_c_zone_t *bank_zones, uint32_t bank_zone_count,
+                        afx_c_output_t *out) {
+    song_section_t *parts = NULL;
+    uint8_t *next = NULL, *streams = NULL;
+    uint32_t *offsets = NULL, *stream_at = NULL, *stream_bytes = NULL, capacity = 0, channels = 1;
+    if (!out) return -1;
+    *out = (afx_c_output_t){0};
+    if (!sections || !section_count || section_count > UINT16_MAX || !order || !order_count ||
+        order_count > AFX_SONG_MAX_ORDER || (loop_index != AFX_C_SONG_ENDS && loop_index >= order_count) ||
+        !tick_rate || !zones || !zone_count || zone_count > UINT16_MAX || (lanes && !lane_channels)) return -1;
+    for (uint32_t i = 0; i < order_count; ++i) if (order[i] >= section_count) return -1;
+    parts = calloc(section_count, sizeof(*parts));
+    next = calloc(section_count, 1);
+    stream_at = calloc(section_count, sizeof(*stream_at));
+    stream_bytes = calloc(section_count, sizeof(*stream_bytes));
+    if (!parts || !next || !stream_at || !stream_bytes) goto failed;
+    for (uint32_t i = 0; i < section_count; ++i) {
+        if (song_section_body(&sections[i], zone_count, &parts[i])) goto failed;
+        for (uint32_t e = 0; e < parts[i].count; ++e)
+            if (parts[i].events[e].channel + 1u > channels) channels = parts[i].events[e].channel + 1u;
+        if (sections[i].count > (UINT32_MAX - capacity - 64u) / 49u) goto failed;
+        capacity += sections[i].count * 49u + 64u;
+    }
+    if (lanes && lane_channels < channels) goto failed;
+    /* Each new-play section's tail meets the heads of the sections it leads to. */
+    for (uint32_t i = 0; i < section_count; ++i) {
+        if (sections[i].join != AFX_JOIN_NEW) continue;
+        memset(next, 0, section_count);
+        for (uint32_t position = 0; position < order_count; ++position) {
+            if (order[position] != i) continue;
+            uint32_t following = position + 1u == order_count ? loop_index : position + 1u;
+            if (following != AFX_C_SONG_ENDS) next[order[following]] = 1;
+        }
+        if (song_section_tail(&sections[i], &parts[i], parts, next, section_count, out)) goto failed;
+    }
+    streams = malloc(capacity);
+    if (!streams) goto failed;
+    uint32_t used = 0;
+    for (uint32_t i = 0; i < section_count; ++i) {
+        stream_at[i] = used;
+        stream_bytes[i] = song_section_stream(&sections[i], &parts[i], streams + used);
+        if (!stream_bytes[i]) goto failed;
+        used += stream_bytes[i];
+    }
+    /* The AFM: header, relocations, then the image. */
+    if (assemble_bank(bank_zones, bank_zone_count, out, &offsets)) goto failed;
+    uint32_t setups = AFX_SONG_IMAGE_HEADER_BYTES, lanes_at = setups + zone_count * AFX_SETUP_BYTES;
+    uint32_t table = lanes_at + (lanes ? (channels + 3u) & ~3u : 0);
+    uint32_t order_at = table + section_count * AFX_SONG_SECTION_BYTES;
+    uint32_t streams_at = (order_at + order_count * 2u + 3u) & ~3u;
+    uint32_t image_bytes = streams_at + used;
+    uint32_t image_at = align32(AFX_SONG_HEADER_BYTES + zone_count * RELOCATION_BYTES);
+    out->afm_bytes = image_at + image_bytes;
+    out->afm = calloc(1, out->afm_bytes);
+    if (!out->afm) goto failed;
+    uint8_t *afm = out->afm, *image = afm + image_at;
+    if (write_setups(zones, zone_count, bank_zones, bank_zone_count, offsets, image, setups,
+                     afm + AFX_SONG_HEADER_BYTES)) goto failed;
+    if (lanes) memcpy(image + lanes_at, lanes, channels);
+    for (uint32_t i = 0; i < section_count; ++i) {
+        afx_write32(image + table + i * 12u, streams_at + stream_at[i]);
+        afx_write32(image + table + i * 12u + 4u, stream_bytes[i]);
+        afx_write32(image + table + i * 12u + 8u, sections[i].body_ticks);
+    }
+    for (uint32_t i = 0; i < order_count; ++i) afx_write16(image + order_at + i * 2u, order[i]);
+    memcpy(image + streams_at, streams, used);
+    afx_write32(image, section_count); afx_write32(image + 4, order_count);
+    afx_write32(image + 8, loop_index == AFX_C_SONG_ENDS ? AFX_SONG_NO_LOOP : loop_index);
+    afx_write32(image + 12, table); afx_write32(image + 16, order_at);
+    afx_write32(image + 20, streams_at); afx_write32(image + 24, used); afx_write32(image + 28, channels);
+    afx_write32(afm, AFX_SONG_MAGIC); afx_write32(afm + 4, AFX_SONG_VERSION);
+    afx_write32(afm + 8, out->afm_bytes); afx_write32(afm + 12, AFX_FLAG_MUSIC | (lanes ? AFX_FLAG_LANES : 0));
+    afx_write32(afm + 16, image_at); afx_write32(afm + 20, image_bytes);
+    afx_write32(afm + 24, zone_count); afx_write32(afm + 28, AFX_SONG_HEADER_BYTES);
+    afx_write32(afm + 36, afx_read32(out->afb + 8)); afx_write32(afm + 40, afx_read32(out->afb + 12));
+    afx_write32(afm + 44, channels);
+    afx_write32(afm + 52, tick_rate); afx_write32(afm + 56, 1);
+    afx_write32(afm + 64, afx_control_id(image, image_bytes));
+    /* AICAflow plays it through: the pool and the work of both executors in a tick. */
+    afx_validation_profile_t work;
+    uint32_t measured_channels, voices;
+    if (afx_song_measure(afm, out->afm_bytes, &work, &measured_channels, &voices) ||
+        measured_channels != channels || !work.peak_commands) goto failed;
+    afx_write32(afm + 48, voices);
+    afx_write32(afm + 60, AFX_WORK_PROFILE(work.peak_commands, work.peak_register_writes));
+    if (afx_song_validate(afm, out->afm_bytes, NULL)) goto failed;
+    for (uint32_t i = 0; i < section_count; ++i) { free(parts[i].events); free(parts[i].sched); free(parts[i].head); }
+    free(parts); free(next); free(streams); free(offsets); free(stream_at); free(stream_bytes);
+    return 0;
+failed:
+    for (uint32_t i = 0; parts && i < section_count; ++i) {
+        free(parts[i].events); free(parts[i].sched); free(parts[i].head);
+    }
+    free(parts); free(next); free(streams); free(offsets); free(stream_at); free(stream_bytes);
+    afx_c_output_free(out);
+    return -1;
+}
+int afx_c_compile_song(const afx_c_section_t *sections, uint32_t section_count,
+                       const uint16_t *order, uint32_t order_count, uint32_t loop_index,
+                       uint32_t tick_rate, const afx_c_zone_t *zones, uint32_t zone_count,
+                       afx_c_output_t *out) {
+    return compile_song(sections, section_count, order, order_count, loop_index, NULL, 0, tick_rate,
+                        zones, zone_count, zones, zone_count, out);
+}
+int afx_c_compile_song_lanes(const afx_c_section_t *sections, uint32_t section_count,
+                             const uint16_t *order, uint32_t order_count, uint32_t loop_index,
+                             const uint8_t *lanes, uint32_t lane_channels,
+                             uint32_t tick_rate, const afx_c_zone_t *zones, uint32_t zone_count,
+                             afx_c_output_t *out) {
+    if (!lanes) return -1;
+    return compile_song(sections, section_count, order, order_count, loop_index, lanes, lane_channels,
+                        tick_rate, zones, zone_count, zones, zone_count, out);
 }
 
 int afx_c_compile_events(const afx_c_event_t *input, uint32_t count,
                          uint32_t duration_ticks, uint32_t tick_rate,
                          const afx_c_zone_t *zones, uint32_t zone_count,
                          afx_c_output_t *out) {
-    return compile_events(input, count, duration_ticks, AFX_C_NO_LOOP, tick_rate, zones, zone_count,
-                          zones, zone_count, out);
-}
-int afx_c_compile_events_loop(const afx_c_event_t *input, uint32_t count,
-                              uint32_t duration_ticks, uint32_t loop_tick, uint32_t tick_rate,
-                              const afx_c_zone_t *zones, uint32_t zone_count,
-                              afx_c_output_t *out) {
-    return compile_events(input, count, duration_ticks, loop_tick, tick_rate, zones, zone_count,
+    return compile_events(input, count, duration_ticks, tick_rate, zones, zone_count,
                           zones, zone_count, out);
 }
 

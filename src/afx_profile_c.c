@@ -441,7 +441,8 @@ static int advance_to(bytes_t *stream, uint32_t *tick, uint32_t next, uint32_t l
 }
 static int rewrite_stream(const uint8_t *image, const afx_file_header_t *header, profile_t *profile, bytes_t *stream, uint32_t *max_commands, uint32_t *max_writes) {
     uint32_t at = header->stream_offset, end = at + header->stream_size, tick = 0, ordinal = 0, ordinal_tick = UINT32_MAX, commands = 0, writes = 0;
-    uint32_t loop_tick = header->flags & AFX_FLAG_LOOP ? header->loop_tick : UINT32_MAX, loop_offset = UINT32_MAX;
+    /* Flows no longer loop (a song's continue join replaced LOOP); no boundary to keep. */
+    uint32_t loop_tick = UINT32_MAX, loop_offset = UINT32_MAX;
     params_t active[AFX_MAX_FLOW_CHANNELS] = {{0}}; bool active_note[AFX_MAX_FLOW_CHANNELS] = {0}; *max_commands = *max_writes = 0;
     while (at < end) {
         afx_event_t event; uint16_t values[AFX_FIELD_COUNT];
@@ -474,11 +475,6 @@ static int rewrite_stream(const uint8_t *image, const afx_file_header_t *header,
             if (writes > *max_writes) *max_writes = writes;
             commands = writes = 0;
             continue;
-        }
-        else if (event.opcode == AFX_OP_LOOP) {
-            /* The target follows the rewritten boundary at the loop tick. */
-            if (loop_offset == UINT32_MAX && !(advance_to(stream, &tick, loop_tick, loop_tick, &loop_offset) == 0 && loop_offset != UINT32_MAX)) return -1;
-            event.target = loop_offset;
         }
         else if (event.opcode == AFX_OP_NOTE) {
             if (event.setup >= header->setup_count) return -1;
