@@ -99,6 +99,21 @@ int afx_c_optimize_events(const afx_c_event_t *events, uint32_t count,
                           afx_c_event_t **out_events, afx_c_zone_t **out_zones,
                           uint32_t *out_zone_count);
 
+/* How far each zone's sample is read in one play of `events` (a flow, or one song
+ * section on its own channels): a voice runs from its NOTE until the next NOTE on
+ * its channel in `events` or, when none comes, until its envelope is fully down
+ * (AICA envelope timing, each stage from full level, so never early; a held
+ * envelope reads the whole sample). Pitch includes PATCH changes and the LFO's
+ * deepest pitch swing. A NOTE on a voice still keyed on (no KEYOFF since its
+ * NOTE) reads its whole sample: the AICA does not restart a keyed-on voice. Raises reach[zone] (frames, zone_count entries); call it
+ * once per play, then afx_c_trim_zones. Returns 0, or -1 for bad input. */
+int afx_c_sample_reach(const afx_c_event_t *events, uint32_t count, const afx_c_zone_t *zones,
+                       uint32_t zone_count, uint32_t tick_rate, uint32_t *reach);
+/* Shortens each PCM sample to the furthest reach of the zones that share it,
+ * rounded up to 4 frames, keeping loop bounds inside it; a sample whose voices
+ * reach its loop stays whole. Returns the frames removed (each sample once). */
+uint32_t afx_c_trim_zones(afx_c_zone_t *zones, uint32_t zone_count, const uint32_t *reach);
+
 /* Lossy simplification of a register trace before emission, for importers that record every
  * change a source driver made (a console recording, say). Within one channel, a PATCH value is
  * dropped while it stays within a tolerance of the last value kept, so the AICA keeps a value at

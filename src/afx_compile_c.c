@@ -1150,3 +1150,115 @@ int afx_c_compile_sine(const afx_c_note_t *notes, uint32_t count,
                                    0, SINE_FRAMES - 1, 0, 44100};
     return afx_c_compile_sample(notes, count, tick_rate, &sample, out);
 }
+
+/* ---------------------------------------------------------------- sample reach
+ * AICA envelope timing (ms for a full 0..1023 sweep at an effective rate), as the
+ * AICA documents it: attack, then decay and release. */
+static const double reach_attack_ms[64] = {100000,100000,8100,6900,6000,4800,4000,3400,3000,
+    2400,2000,1700,1500,1200,1000,860,760,600,500,430,380,300,250,220,190,150,130,
+    110,95,76,63,55,47,38,31,27,24,19,15,13,12,9.4,7.9,6.8,6,4.7,3.8,3.4,3,2.4,2,
+    1.8,1.6,1.3,1.1,.93,.85,.65,.53,.44,.4,.35,0,0};
+static const double reach_decay_ms[64] = {100000,100000,118200,101300,88600,70900,59100,50700,
+    44300,35500,29600,25300,22200,17700,14800,12700,11100,8900,7400,6300,5500,4400,
+    3700,3200,2800,2200,1800,1600,1400,1100,920,790,690,550,460,390,340,270,230,200,
+    170,140,110,98,85,68,57,49,43,34,28,25,22,18,14,12,11,8.5,7.1,6.1,5.4,4.3,3.6,3.1};
+static const double reach_plfo_cents[8] = {0, 7, 13.5, 27, 55, 112, 230, 494};
+
+static int reach_rate(uint16_t dr, uint16_t pitch, uint32_t rate) {
+    if (!rate) return 0;
+    int base = 0, krs = (dr >> 10) & 15;
+    if (krs != 15) { int octave = (pitch >> 11) & 15; if (octave & 8) octave -= 16; base = octave + 2 * krs + ((pitch >> 9) & 1); }
+    int r = base + 2 * (int)rate; return r < 0 ? 0 : r > 63 ? 63 : r;
+}
+
+/* Milliseconds from key-on (or from key-off, with keyed_off) until the envelope
+ * is fully down, each stage taken from full level so never early; < 0: it holds. */
+static double reach_life_ms(uint16_t ad, uint16_t dr, uint16_t pitch, int keyed_off) {
+    if (keyed_off) { int rr = reach_rate(dr, pitch, dr & 31); return rr < 2 ? -1.0 : reach_decay_ms[rr]; }
+    int ar = reach_rate(dr, pitch, ad & 31), d1 = reach_rate(dr, pitch, (ad >> 6) & 31), d2 = reach_rate(dr, pitch, (ad >> 11) & 31);
+    double level = ((dr >> 5) & 31) * 32.0, ms = ar < 2 ? 0 : reach_attack_ms[ar];
+    if (level > 0) { if (d1 < 2) return -1.0; ms += reach_decay_ms[d1] * level / 1024.0; }
+    if (level < 1023.0) { if (d2 < 2) return -1.0; ms += reach_decay_ms[d2] * (1023.0 - level) / 1024.0; }
+    return ms;
+}
+
+static double reach_ratio(uint16_t pitch, uint16_t lfo) {
+    int octave = (pitch >> 11) & 15; if (octave & 8) octave -= 16;
+    return ldexp(1.0 + (pitch & 1023) / 1024.0, octave) * pow(2.0, reach_plfo_cents[(lfo >> 5) & 7] / 1200.0);
+}
+
+typedef struct { uint32_t zone, start; double ratio; uint16_t ad, dr, pitch, lfo; uint8_t whole; } reach_voice_t;
+
+static void reach_close(const reach_voice_t *v, uint32_t until, int has_until, uint32_t keyoff, int keyed_off,
+                        uint32_t tick_rate, const afx_c_zone_t *zones, uint32_t *reach) {
+    const afx_c_sample_t *sample = &zones[v->zone].sample;
+    double ms = -1.0;
+    double life = reach_life_ms(v->ad, v->dr, v->pitch, keyed_off);
+    if (life >= 0) ms = ((keyed_off ? keyoff : v->start) - v->start) * 1000.0 / tick_rate + life;
+    if (has_until) { double cut = (until - v->start) * 1000.0 / tick_rate; if (ms < 0 || cut < ms) ms = cut; }
+    uint32_t frames = sample->frames;
+    if (ms >= 0 && !v->whole) {
+        double rate = sample->sample_rate ? sample->sample_rate : 44100.0;
+        double read = ceil(v->ratio * rate * (ms + 1.0) / 1000.0) + 4.0; /* the interpolator's next frame, and a tick's rounding */
+        if (read < frames && (!sample->loop || read < sample->loop_start)) frames = (uint32_t)read;
+    }
+    if (frames > reach[v->zone]) reach[v->zone] = frames;
+}
+
+int afx_c_sample_reach(const afx_c_event_t *events, uint32_t count, const afx_c_zone_t *zones, uint32_t zone_count,
+                       uint32_t tick_rate, uint32_t *reach) {
+    if ((!events && count) || !zones || !reach || !tick_rate) return -1;
+    reach_voice_t voice[AFX_MAX_FLOW_CHANNELS]; uint8_t live[AFX_MAX_FLOW_CHANNELS] = {0}, off[AFX_MAX_FLOW_CHANNELS] = {0};
+    uint32_t keyoff[AFX_MAX_FLOW_CHANNELS] = {0};
+    for (uint32_t i = 0; i < count; ++i) {
+        const afx_c_event_t *e = &events[i]; uint8_t c = e->channel;
+        if (c >= AFX_MAX_FLOW_CHANNELS) return -1;
+        if (e->opcode == AFX_OP_NOTE) {
+            if (e->setup >= zone_count) return -1;
+            if (live[c]) reach_close(&voice[c], e->tick, 1, keyoff[c], off[c], tick_rate, zones, reach);
+            /* The AICA ignores a key-on for a voice still keyed on: such a NOTE does not restart its sample but
+             * goes on reading from where the voice was, so it may read anywhere in it. */
+            const uint8_t held = live[c] && !off[c];
+            const afx_c_zone_t *z = &zones[e->setup];
+            uint16_t word[AFX_FIELD_COUNT];
+            for (int f = 0; f < AFX_FIELD_COUNT; ++f)
+                word[f] = (e->mask & (1u << f)) ? e->fields[f] : (z->setup_mask & (1u << f)) ? z->setup[f] : e->fields[f];
+            voice[c] = (reach_voice_t){e->setup, e->tick, 0, word[AFX_FIELD_ENV_AD], word[AFX_FIELD_ENV_DR], word[AFX_FIELD_PITCH], word[AFX_FIELD_LFO], held};
+            voice[c].ratio = reach_ratio(voice[c].pitch, voice[c].lfo);
+            live[c] = 1; off[c] = 0;
+        } else if (live[c] && e->opcode == AFX_OP_PATCH) {
+            reach_voice_t *v = &voice[c];
+            if (e->mask & (1u << AFX_FIELD_ENV_AD)) v->ad = e->fields[AFX_FIELD_ENV_AD];
+            if (e->mask & (1u << AFX_FIELD_ENV_DR)) v->dr = e->fields[AFX_FIELD_ENV_DR];
+            if (e->mask & (1u << AFX_FIELD_LFO)) v->lfo = e->fields[AFX_FIELD_LFO];
+            if (e->mask & (1u << AFX_FIELD_PITCH)) v->pitch = e->fields[AFX_FIELD_PITCH];
+            double r = reach_ratio(v->pitch, v->lfo); if (r > v->ratio) v->ratio = r;
+        } else if (live[c] && e->opcode == AFX_OP_KEYOFF && !off[c]) { off[c] = 1; keyoff[c] = e->tick; }
+    }
+    for (uint32_t c = 0; c < AFX_MAX_FLOW_CHANNELS; ++c)
+        if (live[c]) reach_close(&voice[c], 0, 0, keyoff[c], off[c], tick_rate, zones, reach);
+    return 0;
+}
+
+uint32_t afx_c_trim_zones(afx_c_zone_t *zones, uint32_t zone_count, const uint32_t *reach) {
+    uint32_t saved = 0;
+    for (uint32_t i = 0; i < zone_count; ++i) {
+        afx_c_sample_t *s = &zones[i].sample;
+        uint32_t keep = 0, first = 1;
+        for (uint32_t j = 0; j < zone_count; ++j) /* every zone on this sample: the furthest of them */
+            if (zones[j].sample.data == s->data) { if (j < i) first = 0; if (reach[j] > keep) keep = reach[j]; }
+        if (!keep || keep >= s->frames || s->format == AFX_ADPCM) continue;
+        keep = (keep + 3u) & ~3u; if (keep >= s->frames) continue;
+        if (first) saved += s->frames - keep;
+    }
+    for (uint32_t i = 0; i < zone_count; ++i) { /* apply after measuring, so shared samples measure alike */
+        afx_c_sample_t *s = &zones[i].sample; uint32_t keep = 0;
+        for (uint32_t j = 0; j < zone_count; ++j) if (zones[j].sample.data == s->data && reach[j] > keep) keep = reach[j];
+        if (!keep || keep >= s->frames || s->format == AFX_ADPCM) continue;
+        keep = (keep + 3u) & ~3u; if (keep >= s->frames) continue;
+        s->frames = keep; s->bytes = s->format == AFX_PCM16 ? keep * 2u : keep;
+        if (s->loop_end >= keep) s->loop_end = (uint16_t)(keep - 1u);
+        if (s->loop_start > s->loop_end) s->loop_start = s->loop_end;
+    }
+    return saved;
+}

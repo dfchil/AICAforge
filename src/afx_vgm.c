@@ -29,6 +29,7 @@ typedef struct {
 } chip_t;
 typedef struct {
     chip_t chips[CHIPS]; uint32_t chip_count, elapsed, order;
+    uint32_t total_samples, loop_samples; /* VGM header: the recording's length and its loop's length. */
     raw_event_t *events; uint32_t event_count, event_capacity;
     sample_t *samples; uint32_t sample_count, sample_capacity;
     double gain_db;
@@ -376,6 +377,7 @@ static int parse_vgm(const char *path, double gain_db, parser_t *parser) {
     if (!clock || (le32(data + 0x34) > UINT32_MAX - 0x34u)) goto failed;
     position = 0x34u + le32(data + 0x34); if (position < 0x40 || position >= bytes) goto failed;
     parser->gain_db = gain_db;
+    parser->total_samples = le32(data + 0x18); parser->loop_samples = le32(data + 0x1c) ? le32(data + 0x20) : 0;
     for (uint32_t i = 0; i < parser->chip_count; ++i) parser->chips[i].pitch_ratio = (double)clock / 180.0 / VGM_RATE;
     stage = 2;
     while (position < bytes) {
@@ -455,12 +457,211 @@ failed:
     free(source); free(data); return -1;
 }
 
+/* ---------------------------------------------------------------- songs
+ * A recording that plays intro, A, A, B and loops (the VGM loop jumps from the
+ * end of B back into A's opening) becomes a song: sections intro, A, B, with
+ * A stored once. Where A's second play ends differently, A splits into A
+ * (the part both plays share) and A-end (the first play's ending); the second
+ * ending stays at the start of B. Every join starts a new play, so a section
+ * keeps the arcade's own voice allocation and its voices ring out on their own:
+ * a section owns the voices that start in its body, with all their later
+ * events (its tail). A voice the source stopped only by taking its channel
+ * gets a key-off there, and each channel's last voice is given back (FREE)
+ * once its envelope is down 60 dB. */
+typedef struct {
+    uint32_t start, last, cut, keyoff, first; /* ticks; cut/keyoff UINT32_MAX for none; first event index */
+    uint16_t ad, dr, pitch; uint8_t channel;
+} voice_t;
+
+static int envelope_rate(uint16_t dr, uint16_t pitch, uint32_t rate) {
+    if (!rate) return 0;
+    int base = 0, krs = (dr >> 10) & 15;
+    if (krs != 15) { int octave = (pitch >> 11) & 15; if (octave & 8) octave -= 16; base = octave + 2 * krs + ((pitch >> 9) & 1); }
+    int r = base + 2 * (int)rate; return r < 0 ? 0 : r > 63 ? 63 : r;
+}
+
+/* When the voice's envelope is 60 dB down (attenuation 640 of 1023), assuming
+ * it was at full level when each stage began; UINT32_MAX when it holds. */
+static uint32_t voice_silent(const voice_t *v, uint32_t keyoff) {
+    const double quiet = 640.0;
+    if (keyoff != UINT32_MAX) {
+        int rr = envelope_rate(v->dr, v->pitch, v->dr & 31);
+        if (rr < 2) return UINT32_MAX;
+        return keyoff + (uint32_t)ceil(dr_ms[rr] * quiet / 1024.0) + 1u;
+    }
+    int ar = envelope_rate(v->dr, v->pitch, v->ad & 31), d1 = envelope_rate(v->dr, v->pitch, (v->ad >> 6) & 31);
+    int d2 = envelope_rate(v->dr, v->pitch, (v->ad >> 11) & 31);
+    double level = ((v->dr >> 5) & 31) * 32.0, ms = ar < 2 ? 0 : ar_ms[ar];
+    if (level >= quiet) { if (d1 < 2) return UINT32_MAX; ms += dr_ms[d1] * quiet / 1024.0; }
+    else {
+        if (level > 0) { if (d1 < 2) return UINT32_MAX; ms += dr_ms[d1] * level / 1024.0; }
+        if (d2 < 2) return UINT32_MAX;
+        ms += dr_ms[d2] * (quiet - level) / 1024.0;
+    }
+    return v->start + (uint32_t)ceil(ms) + 1u;
+}
+
+typedef struct { uint32_t index; uint32_t tick; uint8_t opcode, channel; } song_item_t; /* index UINT32_MAX: made here */
+
+static int compare_items(const void *a, const void *b) {
+    const song_item_t *x = a, *y = b;
+    if (x->tick != y->tick) return x->tick < y->tick ? -1 : 1;
+    uint32_t xi = x->index == UINT32_MAX ? UINT32_MAX - 1u : x->index, yi = y->index == UINT32_MAX ? UINT32_MAX - 1u : y->index;
+    if (xi != yi) return xi < yi ? -1 : 1;
+    return (x->opcode > y->opcode) - (x->opcode < y->opcode); /* KEYOFF before FREE */
+}
+
+/* core_start, period, core_end in ticks; core_end == 0 means core_start + period. */
+static int compile_vgm_song(const parser_t *parser, const afx_c_event_t *events, uint32_t count,
+                            afx_c_zone_t *zones, uint32_t zone_count, uint32_t core_start, uint32_t period,
+                            uint32_t core_end, int adpcm, int trim, afx_c_output_t *out) {
+    int status = -1; uint8_t *section_of = NULL, **adpcm_data = NULL; uint32_t adpcm_count = 0;
+    if (!parser->loop_samples || parser->loop_samples > parser->total_samples) { fprintf(stderr, "afx_vgm: --song needs a VGM loop\n"); return -1; }
+    uint32_t end = tick(parser->total_samples), loop = tick(parser->total_samples - parser->loop_samples);
+    if (!core_end) core_end = core_start + period;
+    uint32_t b_end = end - (loop - core_start);
+    if (!core_start || loop < core_start || core_end <= core_start || core_end > core_start + period || core_end + period >= b_end) {
+        fprintf(stderr, "afx_vgm: --song %u:%u:%u does not fit the recording (loop %u..%u)\n", core_start, period, core_end, loop, end); return -1;
+    }
+    voice_t *voices = calloc(count + 1u, sizeof(*voices)); uint32_t *owner = malloc((count + 1u) * sizeof(*owner));
+    song_item_t *items = NULL; afx_c_event_t *all = NULL, *optimized = NULL; afx_c_zone_t *templates = NULL; uint32_t template_count = 0;
+    uint32_t voice_count = 0, current[64]; for (int c = 0; c < 64; ++c) current[c] = UINT32_MAX;
+    if (!voices || !owner) goto done;
+    for (uint32_t e = 0; e < count; ++e) {
+        const afx_c_event_t *event = &events[e]; uint8_t c = event->channel; owner[e] = UINT32_MAX;
+        if (c >= 64) goto done;
+        if (event->opcode == AFX_OP_NOTE) {
+            if (current[c] != UINT32_MAX) voices[current[c]].cut = event->tick;
+            voice_t *v = &voices[voice_count]; current[c] = voice_count++;
+            *v = (voice_t){.start = event->tick, .last = event->tick, .cut = UINT32_MAX, .keyoff = UINT32_MAX, .first = e, .channel = c,
+                           .ad = event->fields[AFX_FIELD_ENV_AD], .dr = event->fields[AFX_FIELD_ENV_DR], .pitch = event->fields[AFX_FIELD_PITCH]};
+        }
+        if (current[c] == UINT32_MAX) continue;
+        voice_t *v = &voices[current[c]]; owner[e] = current[c]; v->last = event->tick;
+        if (event->opcode == AFX_OP_KEYOFF && v->keyoff == UINT32_MAX) v->keyoff = event->tick;
+        if (event->opcode == AFX_OP_PATCH) {
+            if (event->mask & (1u << AFX_FIELD_ENV_AD)) v->ad = event->fields[AFX_FIELD_ENV_AD];
+            if (event->mask & (1u << AFX_FIELD_ENV_DR)) v->dr = event->fields[AFX_FIELD_ENV_DR];
+            if (event->mask & (1u << AFX_FIELD_PITCH)) v->pitch = event->fields[AFX_FIELD_PITCH];
+        }
+    }
+    /* Sections: intro, A, A-end (when A's plays end differently), B. B's last
+     * stretch repeats A's opening up to the loop point; a note there that is
+     * no copy of one in A stays with B. */
+    enum { INTRO, CORE, CORE_END, B, SECTIONS };
+    uint32_t window[SECTIONS][2] = {{0, core_start}, {core_start, core_end}, {core_end, core_start + period}, {core_end + period, b_end}};
+    int has_end = core_end < core_start + period;
+    section_of = malloc(voice_count + 1u);
+    if (!section_of) goto done;
+    for (uint32_t i = 0; i < voice_count; ++i) {
+        voice_t *v = &voices[i]; section_of[i] = 0xff;
+        for (int s = 0; s < SECTIONS; ++s) if (v->start >= window[s][0] && v->start < window[s][1]) section_of[i] = (uint8_t)s;
+        if (v->start >= b_end && v->start < end) {
+            const afx_c_event_t *note = &events[v->first]; int copy = 0;
+            for (uint32_t j = 0; j < voice_count && !copy; ++j) {
+                const voice_t *w = &voices[j]; const afx_c_event_t *other = &events[w->first];
+                if (w->start < core_start || w->start >= loop) continue;
+                uint32_t at = w->start + (end - loop);
+                copy = (at + 15u >= v->start && at <= v->start + 15u && other->setup == note->setup &&
+                        !memcmp(other->fields, note->fields, sizeof(note->fields)));
+            }
+            if (!copy) section_of[i] = B;
+        }
+    }
+    uint32_t capacity = count * 2u + 4096u, n = 0, section_first[SECTIONS + 1], body[SECTIONS], last_tick[SECTIONS], added = 0, freed = 0;
+    items = malloc(capacity * sizeof(*items));
+    if (!items) goto done;
+    for (int s = 0; s < SECTIONS; ++s) {
+        section_first[s] = n; body[s] = window[s][1] - window[s][0]; last_tick[s] = body[s];
+        if (s == CORE_END && !has_end) continue;
+        uint32_t base = window[s][0], last_voice[64]; for (int c = 0; c < 64; ++c) last_voice[c] = UINT32_MAX;
+        for (uint32_t e = 0; e < count; ++e)
+            if (owner[e] != UINT32_MAX && section_of[owner[e]] == s) {
+                if (n + 2u >= capacity) goto done;
+                items[n++] = (song_item_t){e, events[e].tick - base, events[e].opcode, events[e].channel};
+                if (events[e].opcode == AFX_OP_NOTE) last_voice[events[e].channel] = owner[e];
+            }
+        for (uint32_t i = 0; i < voice_count; ++i) {
+            if (section_of[i] != s) continue;
+            voice_t *v = &voices[i];
+            /* Taken after the body by a note of another play (or never): key it off there if it still sounds. */
+            uint32_t cut = v->cut != UINT32_MAX ? v->cut : end, keyoff = v->keyoff;
+            if (keyoff == UINT32_MAX && cut >= window[s][1] && voice_silent(v, UINT32_MAX) > cut) {
+                if (n + 2u >= capacity) goto done;
+                items[n++] = (song_item_t){UINT32_MAX, cut - base, AFX_OP_KEYOFF, v->channel}; keyoff = cut; ++added;
+            }
+            if (last_voice[v->channel] == i) {
+                uint32_t quiet = voice_silent(v, keyoff);
+                if (quiet == UINT32_MAX) { fprintf(stderr, "afx_vgm: a voice on channel %u holds forever\n", v->channel); goto done; }
+                if (quiet < v->last + 1u) quiet = v->last + 1u;
+                items[n++] = (song_item_t){UINT32_MAX, quiet - base, AFX_OP_FREE, v->channel}; ++freed;
+            }
+        }
+        qsort(items + section_first[s], n - section_first[s], sizeof(*items), compare_items);
+        for (uint32_t k = section_first[s]; k < n; ++k) if (items[k].tick + 1u > last_tick[s]) last_tick[s] = items[k].tick + 1u;
+    }
+    section_first[SECTIONS] = n;
+    /* One setup dictionary for the whole song: optimize every section's events together. */
+    all = calloc(n + 1u, sizeof(*all));
+    if (!all) goto done;
+    for (uint32_t k = 0; k < n; ++k) {
+        if (items[k].index != UINT32_MAX) all[k] = events[items[k].index];
+        else { all[k].opcode = items[k].opcode; all[k].channel = items[k].channel; }
+        all[k].tick = items[k].tick; all[k].order = k;
+    }
+    uint32_t trimmed = 0;
+    if (trim) { /* each section on its own channels: what it reads of each sample */
+        uint32_t *reach = calloc(zone_count, sizeof(*reach));
+        if (!reach) goto done;
+        for (int s = 0; s < SECTIONS; ++s)
+            if (afx_c_sample_reach(all + section_first[s], section_first[s + 1] - section_first[s], zones, zone_count, TICK_RATE, reach)) { free(reach); goto done; }
+        trimmed = afx_c_trim_zones(zones, zone_count, reach); free(reach);
+    }
+    if (afx_c_optimize_events(all, n, zones, zone_count, &optimized, &templates, &template_count)) { fprintf(stderr, "afx_vgm: cannot optimize song events\n"); goto done; }
+    if (adpcm && encode_adpcm_zones(templates, template_count, &adpcm_data, &adpcm_count)) { fprintf(stderr, "afx_vgm: ADPCM encoding failed\n"); goto done; }
+    afx_c_section_t sections[SECTIONS]; uint32_t used = 0, map[SECTIONS];
+    for (int s = 0; s < SECTIONS; ++s) {
+        if (s == CORE_END && !has_end) { map[s] = UINT32_MAX; continue; }
+        map[s] = used;
+        sections[used++] = (afx_c_section_t){optimized + section_first[s], section_first[s + 1] - section_first[s], body[s], last_tick[s], AFX_JOIN_NEW};
+    }
+    uint16_t order[5]; uint32_t order_count = 0;
+    order[order_count++] = (uint16_t)map[INTRO]; order[order_count++] = (uint16_t)map[CORE];
+    if (has_end) order[order_count++] = (uint16_t)map[CORE_END];
+    order[order_count++] = (uint16_t)map[CORE]; order[order_count++] = (uint16_t)map[B];
+    if (afx_c_compile_song(sections, used, order, order_count, 1, TICK_RATE, templates, template_count, out)) {
+        fprintf(stderr, "afx_vgm: AICAflow would refuse this song (sections, body..end ticks:");
+        for (uint32_t k = 0; k < used; ++k) fprintf(stderr, " %u..%u", sections[k].body_ticks, sections[k].end_ticks);
+        fprintf(stderr, ")\n"); goto done;
+    }
+    printf("song: intro %u, A %u", body[INTRO], body[CORE]);
+    if (has_end) printf(", A-end %u", body[CORE_END]);
+    printf(", B %u ticks; loop %u..%u; tails", body[B], loop, end);
+    for (int s = 0; s < SECTIONS; ++s) if (map[s] != UINT32_MAX) printf(" %u", last_tick[s] - body[s]);
+    printf(" ticks; %u key-offs added, %u FREE; %u events moved by %u ticks", added, freed, out->moved_events, out->moved_ticks);
+    if (trim) printf("; %u sample frames never read, trimmed", trimmed);
+    printf("\n");
+    status = 0;
+done:
+    free(voices); free(owner); free(section_of); free(items); free(all); free(optimized); free(templates);
+    for (uint32_t i = 0; i < adpcm_count; ++i) free(adpcm_data[i]);
+    free(adpcm_data);
+    return status;
+}
+
 int main(int argc, char **argv) {
-    const char *source = NULL, *output = NULL; double gain = -6.4; int adpcm = 0;
+    const char *source = NULL, *output = NULL; double gain = -6.4; int adpcm = 0, song = 0, trim = 0;
+    uint32_t song_start = 0, song_period = 0, song_core_end = 0;
     for (int i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--adpcm")) adpcm = 1;
+        else if (!strcmp(argv[i], "--trim")) trim = 1;
         else if (!strcmp(argv[i], "--gain-db") && i + 1 < argc) gain = strtod(argv[++i], NULL);
-        else if (!source) source = argv[i]; else if (!output) output = argv[i]; else { fprintf(stderr, "usage: afx_vgm SOURCE.vgm|vgz OUTPUT.afx [--gain-db DB] [--adpcm]\n"); return 2; }
+        else if (!strcmp(argv[i], "--song") && i + 1 < argc) {
+            unsigned long a = 0, p = 0, c = 0; int got = sscanf(argv[++i], "%lu:%lu:%lu", &a, &p, &c);
+            if (got < 2 || !a || !p || a > UINT32_MAX / 4 || p > UINT32_MAX / 4 || c > UINT32_MAX / 4) { fprintf(stderr, "afx_vgm: --song CORE_START:PERIOD[:CORE_END] in ms\n"); return 2; }
+            song = 1; song_start = (uint32_t)a; song_period = (uint32_t)p; song_core_end = (uint32_t)c;
+        }
+        else if (!source) source = argv[i]; else if (!output) output = argv[i]; else { fprintf(stderr, "usage: afx_vgm SOURCE.vgm|vgz OUTPUT.afx|OUTPUT.afm [--gain-db DB] [--adpcm] [--song CORE_START:PERIOD[:CORE_END]] [--trim]\n"); return 2; }
     }
     if (!source || !output || !isfinite(gain) || gain < -48 || gain > 24) return 2;
     parser_t parser = {0}; afx_c_event_t *events = NULL; afx_c_zone_t *zones = NULL; uint32_t count = 0, zone_count = 0;
@@ -468,6 +669,18 @@ int main(int argc, char **argv) {
     afx_c_output_t result = {0}; char *bank = NULL, *seek = NULL, *visual = NULL; uint8_t **adpcm_data = NULL; uint32_t adpcm_count = 0; int status = 1;
     if (parse_vgm(source, gain, &parser)) { fprintf(stderr, "afx_vgm: cannot parse %s\n", source); goto done; }
     if (compact(&parser, &events, &count, &zones, &zone_count) || !count || !zone_count) { fprintf(stderr, "afx_vgm: cannot lower source events\n"); goto done; }
+    if (song) {
+        if (compile_vgm_song(&parser, events, count, zones, zone_count, song_start, song_period, song_core_end, adpcm, trim, &result)) goto done;
+        bank = with_suffix(output, ".afb");
+        if (!bank || write_file(output, result.afm, result.afm_bytes) || write_file(bank, result.afb, result.afb_bytes)) goto done;
+        printf("wrote %s (%u AFM, %u AFB)\n", output, result.afm_bytes, result.afb_bytes);
+        status = 0; goto done;
+    }
+    if (trim) {
+        uint32_t *reach = calloc(zone_count, sizeof(*reach));
+        if (!reach || afx_c_sample_reach(events, count, zones, zone_count, TICK_RATE, reach)) { free(reach); fprintf(stderr, "afx_vgm: cannot measure the samples' reach\n"); goto done; }
+        printf("%u sample frames never read, trimmed\n", afx_c_trim_zones(zones, zone_count, reach)); free(reach);
+    }
     if (afx_c_optimize_events(events, count, zones, zone_count, &optimized, &templates, &template_count)) {
         fprintf(stderr, "afx_vgm: cannot optimize source events\n"); goto done;
     }

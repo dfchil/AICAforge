@@ -369,6 +369,31 @@ same event pipeline and emits AFB/AFX/AFC/AFV. PCM8 is the default; `--adpcm`
 explicitly selects encoding. Default gain is -6.4 dB. It is not a general VGM
 chip emulator: YM2612, PSG and arbitrary chips are not supported by this tool.
 
+```sh
+build/afx_vgm race.vgz race.afm --song 13799:105120
+build/afx_vgm race.vgz race.afm --song 9900:85020:85238 --adpcm
+```
+
+`--song CORE_START:PERIOD[:CORE_END]` (milliseconds) writes a song (AFM and
+AFB) for a recording that plays an intro, a part A twice and a part B, and
+whose VGM loop jumps from the end of B back into A's opening. A starts at
+CORE_START and plays again PERIOD later. When A's second play ends
+differently from its first, CORE_END is where the two part: A then holds only
+what both plays share, an A-end section holds the first play's ending, and
+the second ending stays with B. The song plays intro, A, [A-end,] A, B and
+goes on at A. Every join starts a new play, so each section keeps the
+recording's own voice allocation and lets its voices ring out; a voice the
+source stopped only by taking its channel is keyed off there, and each
+channel's last voice is given back (`FREE`) once its envelope is 60 dB down.
+The source's loop point must lie in A, and B's ending up to it must repeat
+A's opening, as the recording's loop implies.
+
+`--trim` shortens each sample to the frames its notes read: a voice reads
+from its NOTE until the next NOTE on its channel or, when none comes, until
+its envelope is fully down (AICA envelope timing, each stage from full level,
+so never early). In a song each section counts on its own channels.
+`afx_c_sample_reach` and `afx_c_trim_zones` do this for any importer.
+
 ## Output and resource budgets
 
 The shared emitter generates AFC checkpoints at tick zero and every 10 authored
