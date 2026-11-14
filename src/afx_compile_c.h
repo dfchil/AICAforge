@@ -155,6 +155,12 @@ int afx_c_assign_channels(const afx_c_note_t *notes, uint32_t count,
 int afx_c_compile_zones(const afx_c_note_t *notes, uint32_t count,
                         uint32_t tick_rate, const afx_c_zone_t *zones,
                         uint32_t zone_count, afx_c_output_t *out);
+/* The NOTE and KEYOFF events afx_c_compile_zones lowers notes to (2 * count,
+ * scheduled, on assigned channels, setup = zone index), and the last tick a
+ * note sounds; the caller frees *out_events. For afx_c_compile_windows and
+ * afx_c_sample_reach on a MIDI timeline. */
+int afx_c_note_events(const afx_c_note_t *notes, uint32_t count, const afx_c_zone_t *zones, uint32_t zone_count,
+                      afx_c_event_t **out_events, uint32_t *out_end_tick);
 /* As afx_c_compile_zones, for a song that repeats from loop_tick (an authored
  * tick before the end): an AFM of an intro section before loop_tick and a body
  * after it, both joined by AICAflow's continue join, so a voice sounding at
@@ -207,6 +213,42 @@ int afx_c_compile_song(const afx_c_section_t *sections, uint32_t section_count,
                        const uint16_t *order, uint32_t order_count, uint32_t loop_index,
                        uint32_t tick_rate, const afx_c_zone_t *zones, uint32_t zone_count,
                        afx_c_output_t *out);
+/* A song from one source timeline cut into windows (afx_c_split_sections):
+ * a window is a stretch [start, end) of source ticks. With AFX_JOIN_NEW it owns
+ * the voices whose NOTE starts in it, with all their later events (its tail);
+ * a voice its source stopped only by taking its channel after `end` is keyed
+ * off there when its envelope still sounds, and each channel's last voice is
+ * given back (FREE) once its envelope is 60 dB down. `overlap` (0: none) also
+ * keeps notes from `end` up to that tick that are no copy of a note at the same
+ * place in the opening of the window the order goes on to (it must be the same
+ * after every play of this window). With AFX_JOIN_CONTINUE a window takes the
+ * events in [start, end) and plays on into the next with its voices. A window
+ * entered by a continue join also takes the events in its stretch of the voices
+ * it inherits. Windows may not overlap; the order lists window indices. */
+#define AFX_C_MAX_SECTIONS 64u
+typedef struct { uint32_t start, end, overlap, join; } afx_c_window_t;
+typedef struct { uint32_t keyoffs, frees, trimmed, tail_ticks[AFX_C_MAX_SECTIONS]; } afx_c_split_report_t;
+/* The windows' sections: events in ticks from each window's start, one array
+ * (*out_events, the caller frees it) that out_sections[window] point into.
+ * end_tick is the source's last tick (a voice still keyed on there is keyed
+ * off). zones give the envelopes. */
+int afx_c_split_sections(const afx_c_event_t *events, uint32_t count, uint32_t end_tick,
+                         const afx_c_zone_t *zones, uint32_t zone_count,
+                         const afx_c_window_t *windows, uint32_t window_count,
+                         const uint16_t *order, uint32_t order_count, uint32_t loop_index,
+                         afx_c_event_t **out_events, afx_c_section_t *out_sections, afx_c_split_report_t *report);
+/* Splits, trims the zones' samples to what the sections read (trim), builds
+ * the setup dictionary, lets prepare() change the templates (sample coding,
+ * say) and compiles the song. bank_zones (NULL: the templates) set the AFB's
+ * layout, as afx_c_compile_zones keeps every zone of a shared bank. report may
+ * be NULL. */
+int afx_c_compile_windows(const afx_c_event_t *events, uint32_t count, uint32_t end_tick,
+                          afx_c_zone_t *zones, uint32_t zone_count,
+                          const afx_c_window_t *windows, uint32_t window_count,
+                          const uint16_t *order, uint32_t order_count, uint32_t loop_index, int trim,
+                          int (*prepare)(afx_c_zone_t *templates, uint32_t template_count, void *user), void *user,
+                          const afx_c_zone_t *bank_zones, uint32_t bank_zone_count,
+                          uint32_t tick_rate, afx_c_output_t *out, afx_c_split_report_t *report);
 /* As afx_c_compile_song, with a lane per local channel (AICAflow lanes): lanes
  * holds lane_channels entries, at least the channels the song uses. */
 int afx_c_compile_song_lanes(const afx_c_section_t *sections, uint32_t section_count,

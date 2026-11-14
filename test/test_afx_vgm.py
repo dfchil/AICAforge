@@ -95,10 +95,17 @@ with tempfile.TemporaryDirectory() as directory:
     assert afc.read_bytes()[:4] == b"AFC\0"
     assert afv.read_bytes()[:4] == b"VIZ1"
 
-    # A song: intro, A stored once and played twice, B, looping back to A.
+    # A song from a bank map: intro, A stored once and played twice, B, looping back to A.
     source, output = root / "song.vgm", root / "song.afm"
     source.write_bytes(song_fixture())
-    subprocess.run([str(TOOL), str(source), str(output), "--song", "500:1000"], check=True)
+    structure = """song song song.vgm
+section song intro 0    500
+section song a     500  1500
+section song b     2500 3000 overlap=3100
+order   song intro a a b loop=a
+"""
+    (root / "bank.afbm").write_text(structure)
+    subprocess.run([str(TOOL), str(source), str(output), "--map", str(root / "bank.afbm")], check=True)
     afm = output.read_bytes()
     assert afm[:4] == b"AFM1"
     image = struct.unpack_from("<I", afm, 16)[0]
@@ -108,11 +115,19 @@ with tempfile.TemporaryDirectory() as directory:
     assert [struct.unpack_from("<3I", afm, image + table + 12 * i)[2] for i in range(3)] == [500, 1000, 500]
     assert output.with_suffix(".afb").read_bytes()[:4] == b"AFB\0"
 
-    # --trim keeps only the frames the notes read before their release ends.
+    # `trim` in the map keeps only the frames the notes read before their release ends; --name picks the song.
+    (root / "trim.afbm").write_text("trim\n" + structure)
     trimmed = root / "trimmed.afm"
-    subprocess.run([str(TOOL), str(source), str(trimmed), "--song", "500:1000", "--trim"], check=True)
+    subprocess.run([str(TOOL), str(source), str(trimmed), "--map", str(root / "trim.afbm"), "--name", "song"], check=True)
     whole, cut = output.with_suffix(".afb").stat().st_size, trimmed.with_suffix(".afb").stat().st_size
     assert cut <= whole, (cut, whole)
     assert trimmed.read_bytes()[:4] == b"AFM1"
+
+    # A map without the song's structure leaves a plain flow; a section without an order is refused.
+    plain = root / "other.afx"
+    subprocess.run([str(TOOL), str(source), str(plain), "--map", str(root / "bank.afbm")], check=True)
+    assert plain.read_bytes()[:4] == b"AFX2"
+    (root / "bad.afbm").write_text("song song x.vgm\nsection song a 0 100\n")
+    assert subprocess.run([str(TOOL), str(source), str(root / "bad.afm"), "--map", str(root / "bad.afbm"), "--name", "song"]).returncode != 0
 
 print("native VGM importer fixture passed")

@@ -17,6 +17,14 @@ the commit history.
   `afx_c_compile_zones_song()`. `afx_scene` manifests take `song NAME file.afm`
   entries. Flows without a loop compile byte for byte as before. Needs the
   pinned AICAflow with songs (format API 6).
+- AFBM song structure and trimming: `section <song> <name> <start> <end>
+  [join=new|continue] [overlap=<tick>]` and `order <song> <section>...
+  [loop=<section>]` make a song an AFM of those sections, and `trim` cuts each
+  PCM sample of the bank to the frames its songs read (renders unchanged).
+  `afx_bank` reads them for MIDI songs; `afx_vgm --map BANK.afbm [--name SONG]`
+  reads `trim`, `song`, `section` and `order` for a VGM recording. Library:
+  `afx_c_split_sections()`, `afx_c_compile_windows()`, `afx_c_note_events()`,
+  `afx_c_sample_reach()` and `afx_c_trim_zones()`.
 
 ### Removed
 

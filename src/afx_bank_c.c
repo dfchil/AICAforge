@@ -13,6 +13,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "afx_map_c.h"
+
 typedef struct { char name[128], path[1024]; uint8_t channel; } source_t;
 typedef struct {
     char song[128];
@@ -27,6 +29,7 @@ typedef struct {
     uint32_t tick_rate, release_tail_ms;
     humanize_t humanize;
     afx_c_sf2_output_t resolved;
+    afx_map_structure_t structure; /* `section` and `order` lines: an AFM song when it has them */
 } song_t;
 
 /* `humanize` hashes a fixed, short JSON identity.  Keeping this tiny SHA-256
@@ -372,7 +375,9 @@ static int append_resolved(afx_c_sf2_output_t *to, afx_c_sf2_output_t *from) {
 }
 
 static int parse_map(const char *path, source_t **out_sources, uint32_t *out_source_count,
-                     map_t **out_maps, uint32_t *out_map_count, song_t **out_songs, uint32_t *out_song_count) {
+                     map_t **out_maps, uint32_t *out_map_count, song_t **out_songs, uint32_t *out_song_count,
+                     int *out_trim) {
+    int trim = 0;
     FILE *file = fopen(path, "r"); char line[1400];
     source_t *sources = NULL; map_t *maps = NULL; song_t *songs = NULL;
     uint32_t source_count = 0, map_count = 0, song_count = 0;
@@ -439,6 +444,16 @@ static int parse_map(const char *path, source_t **out_sources, uint32_t *out_sou
             song_t *grown = realloc(songs, (size_t)(song_count + 1u) * sizeof(*songs));
             if (!grown) goto failed;
             songs = grown; songs[song_count++] = item;
+        } else if (!strcmp(kind, "trim")) {
+            char extra[8];
+            if (trim || sscanf(cursor, "trim %7s", extra) == 1) goto failed;
+            trim = 1;
+        } else if (!strcmp(kind, "section") || !strcmp(kind, "order")) {
+            char name[AFX_MAP_NAME_BYTES]; uint32_t song = 0;
+            if (afx_map_line_song(cursor, name, sizeof(name))) goto failed;
+            while (song < song_count && strcmp(songs[song].name, name)) ++song;
+            if (song == song_count || (kind[0] == 's' ? afx_map_parse_section(cursor, &songs[song].structure)
+                                                      : afx_map_parse_order(cursor, &songs[song].structure))) goto failed;
         } else if (!strcmp(kind, "humanize")) {
             char name[128]; unsigned seed, level, shorten, lfo; int used = 0;
             if (sscanf(cursor, "humanize %127s %u %u %u %u %n", name, &seed, &level, &shorten, &lfo, &used) != 5 ||
@@ -451,6 +466,9 @@ static int parse_map(const char *path, source_t **out_sources, uint32_t *out_sou
     }
     fclose(file);
     if (!source_count || !map_count || !song_count) goto failed_no_file;
+    for (uint32_t song = 0; song < song_count; ++song)
+        if (afx_map_structure_state(&songs[song].structure) < 0) goto failed_no_file;
+    *out_trim = trim;
     *out_sources = sources; *out_source_count = source_count; *out_maps = maps; *out_map_count = map_count;
     *out_songs = songs; *out_song_count = song_count; return 0;
 failed:
@@ -554,19 +572,83 @@ static int create_map(int argc, char **argv) {
     free(programs); return failed ? -1 : 0;
 }
 
+/* A song's structure (`section`/`order`): the AFM path; without it a plain flow. */
+static int is_song(const song_t *song) { return afx_map_structure_state(&song->structure) == 1; }
+
+/* Raises reach with what the song reads of each zone's sample: its sections each on their own channels. */
+static int song_reach(const song_t *song, const afx_c_zone_t *zones, uint32_t zone_count, uint32_t *reach) {
+    afx_c_event_t *events = NULL, *split = NULL; uint32_t end = 0, count = 2u * song->resolved.note_count; int status = -1;
+    if (afx_c_note_events(song->resolved.notes, song->resolved.note_count, zones, zone_count, &events, &end)) return -1;
+    if (is_song(song)) {
+        const afx_map_structure_t *s = &song->structure; afx_c_section_t sections[AFX_C_MAX_SECTIONS];
+        if (afx_c_split_sections(events, count, end, zones, zone_count, s->windows, s->section_count, s->order,
+                                 s->order_count, s->loop_index, &split, sections, NULL)) goto done;
+        for (uint32_t w = 0; w < s->section_count; ++w)
+            if (afx_c_sample_reach(sections[w].events, sections[w].count, zones, zone_count, song->tick_rate, reach)) goto done;
+    } else if (afx_c_sample_reach(events, count, zones, zone_count, song->tick_rate, reach)) goto done;
+    status = 0;
+done:
+    free(events); free(split); return status;
+}
+
+/* Trims the zones' samples to what the songs read (the map's `trim`). */
+static int trim_songs(const song_t *songs, uint32_t song_count, afx_c_zone_t *zones, uint32_t zone_count) {
+    uint32_t *reach = calloc(zone_count ? zone_count : 1u, sizeof(*reach));
+    if (!reach) return -1;
+    for (uint32_t song = 0; song < song_count; ++song)
+        if (song_reach(songs + song, zones, zone_count, reach)) { free(reach); return -1; }
+    afx_c_trim_zones(zones, zone_count, reach); free(reach); return 0;
+}
+
+/* The song's flow, or its AFM when the map gives it sections; the AFB lays out every zone. */
+static int compile_song_output(const song_t *song, const afx_c_zone_t *zones, uint32_t zone_count, afx_c_output_t *out) {
+    if (!is_song(song))
+        return afx_c_compile_zones(song->resolved.notes, song->resolved.note_count, song->tick_rate, zones, zone_count, out);
+    const afx_map_structure_t *s = &song->structure;
+    afx_c_event_t *events = NULL; uint32_t end = 0; int status = -1;
+    afx_c_zone_t *copy = malloc((size_t)zone_count * sizeof(*copy));
+    if (copy && !afx_c_note_events(song->resolved.notes, song->resolved.note_count, zones, zone_count, &events, &end)) {
+        memcpy(copy, zones, (size_t)zone_count * sizeof(*copy));
+        status = afx_c_compile_windows(events, 2u * song->resolved.note_count, end, copy, zone_count, s->windows,
+                                       s->section_count, s->order, s->order_count, s->loop_index, 0, NULL, NULL,
+                                       zones, zone_count, song->tick_rate, out, NULL);
+    }
+    free(events); free(copy); return status;
+}
+
+/* The bank identity a flow or song binds. */
+static void output_bank(const afx_c_output_t *out, uint32_t *low, uint32_t *high) {
+    if (out->afm) { *low = afx_read32(out->afm + 36); *high = afx_read32(out->afm + 40); }
+    else { *low = afx_read32(out->afx + 40); *high = afx_read32(out->afx + 44); }
+}
+
+/* Writes NAME.afm, or NAME.afx/.afc/.afv. */
+static int write_controls(const char *directory, const char *name, const afx_c_output_t *out) {
+    char afx[4096], afc[4096], afv[4096];
+    if (out->afm) {
+        if (snprintf(afx, sizeof(afx), "%s/%s.afm", directory, name) >= (int)sizeof(afx)) return -1;
+        return write_file(afx, out->afm, out->afm_bytes);
+    }
+    return flow_paths(directory, name, afx, afc, afv) || write_file(afx, out->afx, out->afx_bytes) ||
+           write_file(afc, out->afc, out->afc_bytes) || write_file(afv, out->afv, out->afv_bytes);
+}
+
 static int build_per_song(const char *map_path, const char *directory) {
     source_t *sources = NULL; map_t *maps = NULL; song_t *songs = NULL;
-    uint32_t source_count = 0, map_count = 0, song_count = 0;
-    if (parse_map(map_path, &sources, &source_count, &maps, &map_count, &songs, &song_count)) goto failed;
+    uint32_t source_count = 0, map_count = 0, song_count = 0; int trim = 0;
+    if (parse_map(map_path, &sources, &source_count, &maps, &map_count, &songs, &song_count, &trim)) goto failed;
     for (uint32_t song = 0; song < song_count; ++song) {
         afx_c_output_t out = {0};
-        char afb[4096], afx[4096], afc[4096], afv[4096], afi[4096], named_afi[4096];
+        char afb[4096], afi[4096], named_afi[4096];
         if (resolve_song(songs + song, maps, map_count)) {
             fprintf(stderr, "%s: cannot resolve MIDI programs through its AFBM map\n", songs[song].name); goto failed;
         }
-        if (afx_c_compile_zones(songs[song].resolved.notes, songs[song].resolved.note_count, songs[song].tick_rate,
-                                songs[song].resolved.zones, songs[song].resolved.zone_count, &out)) {
-            fprintf(stderr, "%s: cannot compile resolved sample zones\n", songs[song].name); goto failed;
+        if (trim && trim_songs(songs + song, 1, songs[song].resolved.zones, songs[song].resolved.zone_count)) {
+            fprintf(stderr, "%s: cannot measure what its notes read of the samples\n", songs[song].name); goto failed;
+        }
+        if (compile_song_output(songs + song, songs[song].resolved.zones, songs[song].resolved.zone_count, &out)) {
+            fprintf(stderr, "%s: cannot compile resolved sample zones%s\n", songs[song].name,
+                    is_song(songs + song) ? " into its sections" : ""); goto failed;
         }
         if (out.afb_bytes < AFX_BANK_HEADER_BYTES || out.afb_bytes - AFX_BANK_HEADER_BYTES > AFX_TARGET_MAX_BANK_BYTES) {
             fprintf(stderr, "%s: AFB is %u bytes; AICA asset limit is %u bytes\n",
@@ -574,10 +656,8 @@ static int build_per_song(const char *map_path, const char *directory) {
         }
         if (
             snprintf(afb, sizeof(afb), "%s/%s.afb", directory, songs[song].name) >= (int)sizeof(afb) ||
-            flow_paths(directory, songs[song].name, afx, afc, afv) ||
             index_paths(afb, afi, named_afi) ||
-            write_file(afb, out.afb, out.afb_bytes) || write_file(afx, out.afx, out.afx_bytes) ||
-            write_file(afc, out.afc, out.afc_bytes) || write_file(afv, out.afv, out.afv_bytes) ||
+            write_file(afb, out.afb, out.afb_bytes) || write_controls(directory, songs[song].name, &out) ||
             write_afi(afi, out.afb, out.afb_bytes, songs[song].resolved.zones,
                       songs[song].resolved.zone_count, songs[song].resolved.zone_names, 0) ||
             write_afi(named_afi, out.afb, out.afb_bytes, songs[song].resolved.zones,
@@ -928,10 +1008,10 @@ merged:
         "       %s --per-song library.afbm output-dir\n"
         "       %s --merge [--shared core.afb ...] bank.afb controls-dir flow.afx [flow.afx ...]\n", argv[0], argv[0], argv[0]), 2;
     source_t *sources = NULL; map_t *maps = NULL; song_t *songs = NULL;
-    uint32_t source_count = 0, map_count = 0, song_count = 0, zone_count = 0;
+    uint32_t source_count = 0, map_count = 0, song_count = 0, zone_count = 0; int trim = 0;
     afx_c_zone_t *zones = NULL;
     char (*zone_names)[AFX_C_SAMPLE_NAME_BYTES] = NULL;
-    if (parse_map(argv[1], &sources, &source_count, &maps, &map_count, &songs, &song_count)) goto failed;
+    if (parse_map(argv[1], &sources, &source_count, &maps, &map_count, &songs, &song_count, &trim)) goto failed;
     for (uint32_t song = 0; song < song_count; ++song) {
         if (resolve_song(songs + song, maps, map_count) || songs[song].resolved.zone_count > UINT32_MAX - zone_count ||
             songs[song].resolved.note_count > UINT16_MAX) goto failed;
@@ -954,11 +1034,11 @@ merged:
         zone_count += songs[song].resolved.zone_count;
     }
     if (!zone_count) goto failed;
+    if (trim && trim_songs(songs, song_count, zones, zone_count)) goto failed; /* one bank: the furthest any song reads */
     uint32_t bank_low = 0, bank_high = 0;
     for (uint32_t song = 0; song < song_count; ++song) {
         afx_c_output_t out;
-        if (afx_c_compile_zones(songs[song].resolved.notes, songs[song].resolved.note_count, songs[song].tick_rate,
-                                zones, zone_count, &out)) goto failed;
+        if (compile_song_output(songs + song, zones, zone_count, &out)) goto failed;
         if (out.afb_bytes < AFX_BANK_HEADER_BYTES || out.afb_bytes - AFX_BANK_HEADER_BYTES > AFX_TARGET_MAX_BANK_BYTES) {
             afx_c_output_free(&out); goto failed;
         }
@@ -971,13 +1051,10 @@ merged:
                 afx_c_output_free(&out); goto failed;
             }
         }
-        if (afx_read32(out.afx + 40) != bank_low || afx_read32(out.afx + 44) != bank_high) {
-            afx_c_output_free(&out); goto failed;
-        }
-        char afx[4096], afc[4096], afv[4096];
-        int error = flow_paths(argv[2], songs[song].name, afx, afc, afv) ||
-                    write_file(afx, out.afx, out.afx_bytes) || write_file(afc, out.afc, out.afc_bytes) ||
-                    write_file(afv, out.afv, out.afv_bytes);
+        uint32_t low = 0, high = 0;
+        output_bank(&out, &low, &high);
+        if (low != bank_low || high != bank_high) { afx_c_output_free(&out); goto failed; }
+        int error = write_controls(argv[2], songs[song].name, &out);
         afx_c_output_free(&out);
         if (error) goto failed;
     }

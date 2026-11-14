@@ -179,6 +179,23 @@ The bank builder writes the shared `.afb` plus one `.afx`, `.afc` and `.afv`
 for each song. `--create-map` creates an editable starting AFBM from an SF2
 and MIDI files.
 
+A song's `section` and `order` lines make it an AICAflow song (AFM): its
+sections play in the order given, each joined to the next with fresh voices
+(`join=new`) or the same ones (`join=continue`). A part a song repeats is
+written once and listed twice in the order. `trim` cuts the bank's samples to
+the frames its songs read. `afx_vgm --map` reads the same `trim`, `song`,
+`section` and `order` lines for a VGM recording, which carries its own samples:
+
+```text
+trim
+song lets_go_away "04 Let's Go Away.vgz"
+section lets_go_away intro 0      9900
+section lets_go_away a     9900   85238
+section lets_go_away a_end 85238  94920
+section lets_go_away b     170258 211725 overlap=214984
+order   lets_go_away intro a a_end a b loop=a
+```
+
 `humanize <song> <seed> <level-centibels> <shorten-ms> <lfo-rate-steps>` is
 an optional deterministic offline score-lowering directive. It changes NOTE
 level and KEYOFF placement before AFX emission; it creates no runtime state.
@@ -201,6 +218,9 @@ AFBM `source` accepts SF2 files. Standalone PCM uses `afx_compile --zones`.
 | `map` | `map <song|*> <midi-bank> <midi-program> <source> <sf2-bank> <sf2-program> <format> [option…]` | Routes matching MIDI notes to a preset in a named source. Banks are `0..16383`; programs are `0..127`. |
 | `song` | `song <name> <midi-path> [tick-rate] [release-tail-ms]` | Adds a flow. Tick rate defaults to `1000` (`1..1000000`); release tail defaults to `0` (`0..10000`). |
 | `humanize` | `humanize <song> <seed> <level-centibels> <shorten-ms> 0` | Deterministic level variation `0..120` centibels and KEYOFF shortening `0..20` ms. Must appear after the song. |
+| `trim` | `trim` | At most once, anywhere. Each PCM sample of the bank keeps only the frames its songs read: a voice reads from its NOTE until the next NOTE on its channel or, when none comes, until its envelope is fully down (AICA envelope timing, each stage from full level, so never early); a song with sections counts each on its own channels. The furthest any song reads wins. |
+| `section` | `section <song> <name> <start> <end> [join=new\|continue] [overlap=<tick>]` | A stretch `[start, end)` of the song's source in its ticks. `join=new` (default): the section owns the voices whose NOTE starts in it with all their later events, and the next section starts on fresh voices while these ring out. `join=continue`: the next section goes on with the same voices, as a loop does. `overlap` keeps notes from `end` up to that tick that are no copy of a note at the same place in the opening of the section the order goes on to. Sections may not overlap. After the song. |
+| `order` | `order <song> <section>… [loop=<section>]` | Once per song, after its sections: the play order. `loop` names where the song goes on after the last entry (that section's first place in the order); without it the song ends. A song with sections and an order is written as an AFM song instead of an AFX flow. |
 
 `<format>` is `pcm16`, `pcm8`, `adpcm` or `auto`. `auto` first accepts ADPCM
 only when the deterministic whole-sample and attack-window quality tests pass;
