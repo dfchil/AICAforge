@@ -513,8 +513,8 @@ static int compare_items(const void *a, const void *b) {
 
 /* core_start, period, core_end in ticks; core_end == 0 means core_start + period. */
 static int compile_vgm_song(const parser_t *parser, const afx_c_event_t *events, uint32_t count,
-                            const afx_c_zone_t *zones, uint32_t zone_count, uint32_t core_start, uint32_t period,
-                            uint32_t core_end, int adpcm, afx_c_output_t *out) {
+                            afx_c_zone_t *zones, uint32_t zone_count, uint32_t core_start, uint32_t period,
+                            uint32_t core_end, int adpcm, int trim, afx_c_output_t *out) {
     int status = -1; uint8_t *section_of = NULL, **adpcm_data = NULL; uint32_t adpcm_count = 0;
     if (!parser->loop_samples || parser->loop_samples > parser->total_samples) { fprintf(stderr, "afx_vgm: --song needs a VGM loop\n"); return -1; }
     uint32_t end = tick(parser->total_samples), loop = tick(parser->total_samples - parser->loop_samples);
@@ -609,6 +609,14 @@ static int compile_vgm_song(const parser_t *parser, const afx_c_event_t *events,
         else { all[k].opcode = items[k].opcode; all[k].channel = items[k].channel; }
         all[k].tick = items[k].tick; all[k].order = k;
     }
+    uint32_t trimmed = 0;
+    if (trim) { /* each section on its own channels: what it reads of each sample */
+        uint32_t *reach = calloc(zone_count, sizeof(*reach));
+        if (!reach) goto done;
+        for (int s = 0; s < SECTIONS; ++s)
+            if (afx_c_sample_reach(all + section_first[s], section_first[s + 1] - section_first[s], zones, zone_count, TICK_RATE, reach)) { free(reach); goto done; }
+        trimmed = afx_c_trim_zones(zones, zone_count, reach); free(reach);
+    }
     if (afx_c_optimize_events(all, n, zones, zone_count, &optimized, &templates, &template_count)) { fprintf(stderr, "afx_vgm: cannot optimize song events\n"); goto done; }
     if (adpcm && encode_adpcm_zones(templates, template_count, &adpcm_data, &adpcm_count)) { fprintf(stderr, "afx_vgm: ADPCM encoding failed\n"); goto done; }
     afx_c_section_t sections[SECTIONS]; uint32_t used = 0, map[SECTIONS];
@@ -630,7 +638,9 @@ static int compile_vgm_song(const parser_t *parser, const afx_c_event_t *events,
     if (has_end) printf(", A-end %u", body[CORE_END]);
     printf(", B %u ticks; loop %u..%u; tails", body[B], loop, end);
     for (int s = 0; s < SECTIONS; ++s) if (map[s] != UINT32_MAX) printf(" %u", last_tick[s] - body[s]);
-    printf(" ticks; %u key-offs added, %u FREE; %u events moved by %u ticks\n", added, freed, out->moved_events, out->moved_ticks);
+    printf(" ticks; %u key-offs added, %u FREE; %u events moved by %u ticks", added, freed, out->moved_events, out->moved_ticks);
+    if (trim) printf("; %u sample frames never read, trimmed", trimmed);
+    printf("\n");
     status = 0;
 done:
     free(voices); free(owner); free(section_of); free(items); free(all); free(optimized); free(templates);
@@ -640,17 +650,18 @@ done:
 }
 
 int main(int argc, char **argv) {
-    const char *source = NULL, *output = NULL; double gain = -6.4; int adpcm = 0, song = 0;
+    const char *source = NULL, *output = NULL; double gain = -6.4; int adpcm = 0, song = 0, trim = 0;
     uint32_t song_start = 0, song_period = 0, song_core_end = 0;
     for (int i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--adpcm")) adpcm = 1;
+        else if (!strcmp(argv[i], "--trim")) trim = 1;
         else if (!strcmp(argv[i], "--gain-db") && i + 1 < argc) gain = strtod(argv[++i], NULL);
         else if (!strcmp(argv[i], "--song") && i + 1 < argc) {
             unsigned long a = 0, p = 0, c = 0; int got = sscanf(argv[++i], "%lu:%lu:%lu", &a, &p, &c);
             if (got < 2 || !a || !p || a > UINT32_MAX / 4 || p > UINT32_MAX / 4 || c > UINT32_MAX / 4) { fprintf(stderr, "afx_vgm: --song CORE_START:PERIOD[:CORE_END] in ms\n"); return 2; }
             song = 1; song_start = (uint32_t)a; song_period = (uint32_t)p; song_core_end = (uint32_t)c;
         }
-        else if (!source) source = argv[i]; else if (!output) output = argv[i]; else { fprintf(stderr, "usage: afx_vgm SOURCE.vgm|vgz OUTPUT.afx|OUTPUT.afm [--gain-db DB] [--adpcm] [--song CORE_START:PERIOD[:CORE_END]]\n"); return 2; }
+        else if (!source) source = argv[i]; else if (!output) output = argv[i]; else { fprintf(stderr, "usage: afx_vgm SOURCE.vgm|vgz OUTPUT.afx|OUTPUT.afm [--gain-db DB] [--adpcm] [--song CORE_START:PERIOD[:CORE_END]] [--trim]\n"); return 2; }
     }
     if (!source || !output || !isfinite(gain) || gain < -48 || gain > 24) return 2;
     parser_t parser = {0}; afx_c_event_t *events = NULL; afx_c_zone_t *zones = NULL; uint32_t count = 0, zone_count = 0;
@@ -659,11 +670,16 @@ int main(int argc, char **argv) {
     if (parse_vgm(source, gain, &parser)) { fprintf(stderr, "afx_vgm: cannot parse %s\n", source); goto done; }
     if (compact(&parser, &events, &count, &zones, &zone_count) || !count || !zone_count) { fprintf(stderr, "afx_vgm: cannot lower source events\n"); goto done; }
     if (song) {
-        if (compile_vgm_song(&parser, events, count, zones, zone_count, song_start, song_period, song_core_end, adpcm, &result)) goto done;
+        if (compile_vgm_song(&parser, events, count, zones, zone_count, song_start, song_period, song_core_end, adpcm, trim, &result)) goto done;
         bank = with_suffix(output, ".afb");
         if (!bank || write_file(output, result.afm, result.afm_bytes) || write_file(bank, result.afb, result.afb_bytes)) goto done;
         printf("wrote %s (%u AFM, %u AFB)\n", output, result.afm_bytes, result.afb_bytes);
         status = 0; goto done;
+    }
+    if (trim) {
+        uint32_t *reach = calloc(zone_count, sizeof(*reach));
+        if (!reach || afx_c_sample_reach(events, count, zones, zone_count, TICK_RATE, reach)) { free(reach); fprintf(stderr, "afx_vgm: cannot measure the samples' reach\n"); goto done; }
+        printf("%u sample frames never read, trimmed\n", afx_c_trim_zones(zones, zone_count, reach)); free(reach);
     }
     if (afx_c_optimize_events(events, count, zones, zone_count, &optimized, &templates, &template_count)) {
         fprintf(stderr, "afx_vgm: cannot optimize source events\n"); goto done;

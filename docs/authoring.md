@@ -388,6 +388,12 @@ channel's last voice is given back (`FREE`) once its envelope is 60 dB down.
 The source's loop point must lie in A, and B's ending up to it must repeat
 A's opening, as the recording's loop implies.
 
+`--trim` shortens each sample to the frames its notes read: a voice reads
+from its NOTE until the next NOTE on its channel or, when none comes, until
+its envelope is fully down (AICA envelope timing, each stage from full level,
+so never early). In a song each section counts on its own channels.
+`afx_c_sample_reach` and `afx_c_trim_zones` do this for any importer.
+
 ## Output and resource budgets
 
 The shared emitter generates AFC checkpoints at tick zero and every 10 authored

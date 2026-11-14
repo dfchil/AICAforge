@@ -108,4 +108,11 @@ with tempfile.TemporaryDirectory() as directory:
     assert [struct.unpack_from("<3I", afm, image + table + 12 * i)[2] for i in range(3)] == [500, 1000, 500]
     assert output.with_suffix(".afb").read_bytes()[:4] == b"AFB\0"
 
+    # --trim keeps only the frames the notes read before their release ends.
+    trimmed = root / "trimmed.afm"
+    subprocess.run([str(TOOL), str(source), str(trimmed), "--song", "500:1000", "--trim"], check=True)
+    whole, cut = output.with_suffix(".afb").stat().st_size, trimmed.with_suffix(".afb").stat().st_size
+    assert cut <= whole, (cut, whole)
+    assert trimmed.read_bytes()[:4] == b"AFM1"
+
 print("native VGM importer fixture passed")
