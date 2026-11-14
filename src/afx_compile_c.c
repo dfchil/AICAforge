@@ -651,18 +651,16 @@ int afx_c_compile_zones(const afx_c_note_t *input, uint32_t count,
 }
 /* A flow of the notes, or with a loop tick a song of an intro and a body
  * joined by continue joins (see afx_c_compile_zones_song). */
-int afx_c_compile_zones_song(const afx_c_note_t *input, uint32_t count,
-                             uint32_t tick_rate, uint32_t loop_tick, const afx_c_zone_t *zones,
-                             uint32_t zone_count, afx_c_output_t *out) {
-    if (!out || !input || !count || !tick_rate || !zones || !zone_count || zone_count > UINT16_MAX)
+int afx_c_note_events(const afx_c_note_t *input, uint32_t count, const afx_c_zone_t *zones, uint32_t zone_count,
+                      afx_c_event_t **out_events, uint32_t *out_end_tick) {
+    if (!out_events || !out_end_tick || !input || !count || !zones || !zone_count || zone_count > UINT16_MAX)
         return -1;
-    *out = (afx_c_output_t){0};
+    *out_events = NULL;
     afx_c_note_t *notes = malloc(count * sizeof(*notes));
     event_t *events = malloc(2u * count * sizeof(*events));
-    afx_c_event_t *raw = NULL, *optimized = NULL;
-    afx_c_zone_t *templates = NULL;
+    afx_c_event_t *raw = NULL;
     uint8_t *channels = NULL;
-    uint32_t template_count = 0, channel_count = 0;
+    uint32_t channel_count = 0;
     if (!notes || !events || count > UINT32_MAX / 2u) goto failed;
     raw = calloc(2u * count, sizeof(*raw));
     if (!raw) goto failed;
@@ -714,6 +712,22 @@ int afx_c_compile_zones_song(const afx_c_note_t *input, uint32_t count,
             raw[i].fields[AFX_FIELD_MIX] = events[i].mix ? events[i].mix : level(events[i].velocity);
         }
     }
+    free(channels); free(notes); free(events);
+    *out_events = raw; *out_end_tick = final_end; return 0;
+failed:
+    free(channels); free(notes); free(events); free(raw); return -1;
+}
+
+int afx_c_compile_zones_song(const afx_c_note_t *input, uint32_t count,
+                             uint32_t tick_rate, uint32_t loop_tick, const afx_c_zone_t *zones,
+                             uint32_t zone_count, afx_c_output_t *out) {
+    if (!out || !input || !count || !tick_rate || !zones || !zone_count || zone_count > UINT16_MAX)
+        return -1;
+    *out = (afx_c_output_t){0};
+    afx_c_event_t *raw = NULL, *optimized = NULL;
+    afx_c_zone_t *templates = NULL;
+    uint32_t template_count = 0, final_end = 0;
+    if (count > UINT32_MAX / 2u || afx_c_note_events(input, count, zones, zone_count, &raw, &final_end)) goto failed;
     if (afx_c_optimize_events(raw, 2u * count, zones, zone_count, &optimized, &templates, &template_count))
         goto failed;
     if (loop_tick == AFX_C_NO_LOOP) {
@@ -736,9 +750,9 @@ int afx_c_compile_zones_song(const afx_c_note_t *input, uint32_t count,
         if (compile_song(sections + first, 2u - first, order, 2u - first, 1u - first, NULL, 0, tick_rate,
                          templates, template_count, zones, zone_count, out)) goto failed;
     }
-    free(channels); free(notes); free(events); free(raw); free(optimized); free(templates); return 0;
+    free(raw); free(optimized); free(templates); return 0;
 failed:
-    free(channels); free(notes); free(events); free(raw); free(optimized); free(templates);
+    free(raw); free(optimized); free(templates);
     afx_c_output_free(out); return -1;
 }
 
@@ -1149,4 +1163,331 @@ int afx_c_compile_sine(const afx_c_note_t *notes, uint32_t count,
     const afx_c_sample_t sample = {pcm, sizeof(pcm), SINE_FRAMES, AFX_PCM16, 69, 1,
                                    0, SINE_FRAMES - 1, 0, 44100};
     return afx_c_compile_sample(notes, count, tick_rate, &sample, out);
+}
+
+/* ---------------------------------------------------------------- sample reach
+ * AICA envelope timing (ms for a full 0..1023 sweep at an effective rate), as the
+ * AICA documents it: attack, then decay and release. */
+static const double reach_attack_ms[64] = {100000,100000,8100,6900,6000,4800,4000,3400,3000,
+    2400,2000,1700,1500,1200,1000,860,760,600,500,430,380,300,250,220,190,150,130,
+    110,95,76,63,55,47,38,31,27,24,19,15,13,12,9.4,7.9,6.8,6,4.7,3.8,3.4,3,2.4,2,
+    1.8,1.6,1.3,1.1,.93,.85,.65,.53,.44,.4,.35,0,0};
+static const double reach_decay_ms[64] = {100000,100000,118200,101300,88600,70900,59100,50700,
+    44300,35500,29600,25300,22200,17700,14800,12700,11100,8900,7400,6300,5500,4400,
+    3700,3200,2800,2200,1800,1600,1400,1100,920,790,690,550,460,390,340,270,230,200,
+    170,140,110,98,85,68,57,49,43,34,28,25,22,18,14,12,11,8.5,7.1,6.1,5.4,4.3,3.6,3.1};
+static const double reach_plfo_cents[8] = {0, 7, 13.5, 27, 55, 112, 230, 494};
+
+static int reach_rate(uint16_t dr, uint16_t pitch, uint32_t rate) {
+    if (!rate) return 0;
+    int base = 0, krs = (dr >> 10) & 15;
+    if (krs != 15) { int octave = (pitch >> 11) & 15; if (octave & 8) octave -= 16; base = octave + 2 * krs + ((pitch >> 9) & 1); }
+    int r = base + 2 * (int)rate; return r < 0 ? 0 : r > 63 ? 63 : r;
+}
+
+/* Milliseconds from key-on (or from key-off, with keyed_off) until the envelope
+ * is fully down, each stage taken from full level so never early; < 0: it holds. */
+static double reach_life_ms(uint16_t ad, uint16_t dr, uint16_t pitch, int keyed_off) {
+    if (keyed_off) { int rr = reach_rate(dr, pitch, dr & 31); return rr < 2 ? -1.0 : reach_decay_ms[rr]; }
+    int ar = reach_rate(dr, pitch, ad & 31), d1 = reach_rate(dr, pitch, (ad >> 6) & 31), d2 = reach_rate(dr, pitch, (ad >> 11) & 31);
+    double level = ((dr >> 5) & 31) * 32.0, ms = ar < 2 ? 0 : reach_attack_ms[ar];
+    if (level > 0) { if (d1 < 2) return -1.0; ms += reach_decay_ms[d1] * level / 1024.0; }
+    if (level < 1023.0) { if (d2 < 2) return -1.0; ms += reach_decay_ms[d2] * (1023.0 - level) / 1024.0; }
+    return ms;
+}
+
+static double reach_ratio(uint16_t pitch, uint16_t lfo) {
+    int octave = (pitch >> 11) & 15; if (octave & 8) octave -= 16;
+    return ldexp(1.0 + (pitch & 1023) / 1024.0, octave) * pow(2.0, reach_plfo_cents[(lfo >> 5) & 7] / 1200.0);
+}
+
+typedef struct { uint32_t zone, start; double ratio; uint16_t ad, dr, pitch, lfo; uint8_t whole; } reach_voice_t;
+
+static void reach_close(const reach_voice_t *v, uint32_t until, int has_until, uint32_t keyoff, int keyed_off,
+                        uint32_t tick_rate, const afx_c_zone_t *zones, uint32_t *reach) {
+    const afx_c_sample_t *sample = &zones[v->zone].sample;
+    double ms = -1.0;
+    double life = reach_life_ms(v->ad, v->dr, v->pitch, keyed_off);
+    if (life >= 0) ms = ((keyed_off ? keyoff : v->start) - v->start) * 1000.0 / tick_rate + life;
+    if (has_until) { double cut = (until - v->start) * 1000.0 / tick_rate; if (ms < 0 || cut < ms) ms = cut; }
+    uint32_t frames = sample->frames;
+    if (ms >= 0 && !v->whole) {
+        double rate = sample->sample_rate ? sample->sample_rate : 44100.0;
+        double read = ceil(v->ratio * rate * (ms + 1.0) / 1000.0) + 4.0; /* the interpolator's next frame, and a tick's rounding */
+        if (read < frames && (!sample->loop || read < sample->loop_start)) frames = (uint32_t)read;
+    }
+    if (frames > reach[v->zone]) reach[v->zone] = frames;
+}
+
+int afx_c_sample_reach(const afx_c_event_t *events, uint32_t count, const afx_c_zone_t *zones, uint32_t zone_count,
+                       uint32_t tick_rate, uint32_t *reach) {
+    if ((!events && count) || !zones || !reach || !tick_rate) return -1;
+    reach_voice_t voice[AFX_MAX_FLOW_CHANNELS]; uint8_t live[AFX_MAX_FLOW_CHANNELS] = {0}, off[AFX_MAX_FLOW_CHANNELS] = {0};
+    uint32_t keyoff[AFX_MAX_FLOW_CHANNELS] = {0};
+    for (uint32_t i = 0; i < count; ++i) {
+        const afx_c_event_t *e = &events[i]; uint8_t c = e->channel;
+        if (c >= AFX_MAX_FLOW_CHANNELS) return -1;
+        if (e->opcode == AFX_OP_NOTE) {
+            if (e->setup >= zone_count) return -1;
+            if (live[c]) reach_close(&voice[c], e->tick, 1, keyoff[c], off[c], tick_rate, zones, reach);
+            /* The AICA ignores a key-on for a voice still keyed on: such a NOTE does not restart its sample but
+             * goes on reading from where the voice was, so it may read anywhere in it. */
+            const uint8_t held = live[c] && !off[c];
+            const afx_c_zone_t *z = &zones[e->setup];
+            uint16_t word[AFX_FIELD_COUNT];
+            for (int f = 0; f < AFX_FIELD_COUNT; ++f)
+                word[f] = (e->mask & (1u << f)) ? e->fields[f] : (z->setup_mask & (1u << f)) ? z->setup[f] : e->fields[f];
+            voice[c] = (reach_voice_t){e->setup, e->tick, 0, word[AFX_FIELD_ENV_AD], word[AFX_FIELD_ENV_DR], word[AFX_FIELD_PITCH], word[AFX_FIELD_LFO], held};
+            voice[c].ratio = reach_ratio(voice[c].pitch, voice[c].lfo);
+            live[c] = 1; off[c] = 0;
+        } else if (live[c] && e->opcode == AFX_OP_PATCH) {
+            reach_voice_t *v = &voice[c];
+            if (e->mask & (1u << AFX_FIELD_ENV_AD)) v->ad = e->fields[AFX_FIELD_ENV_AD];
+            if (e->mask & (1u << AFX_FIELD_ENV_DR)) v->dr = e->fields[AFX_FIELD_ENV_DR];
+            if (e->mask & (1u << AFX_FIELD_LFO)) v->lfo = e->fields[AFX_FIELD_LFO];
+            if (e->mask & (1u << AFX_FIELD_PITCH)) v->pitch = e->fields[AFX_FIELD_PITCH];
+            double r = reach_ratio(v->pitch, v->lfo); if (r > v->ratio) v->ratio = r;
+        } else if (live[c] && e->opcode == AFX_OP_KEYOFF && !off[c]) { off[c] = 1; keyoff[c] = e->tick; }
+    }
+    for (uint32_t c = 0; c < AFX_MAX_FLOW_CHANNELS; ++c)
+        if (live[c]) reach_close(&voice[c], 0, 0, keyoff[c], off[c], tick_rate, zones, reach);
+    return 0;
+}
+
+uint32_t afx_c_trim_zones(afx_c_zone_t *zones, uint32_t zone_count, const uint32_t *reach) {
+    uint32_t saved = 0;
+    for (uint32_t i = 0; i < zone_count; ++i) {
+        afx_c_sample_t *s = &zones[i].sample;
+        uint32_t keep = 0, first = 1;
+        for (uint32_t j = 0; j < zone_count; ++j) /* every zone on this sample: the furthest of them */
+            if (zones[j].sample.data == s->data) { if (j < i) first = 0; if (reach[j] > keep) keep = reach[j]; }
+        if (!keep || keep >= s->frames || s->format == AFX_ADPCM) continue;
+        keep = (keep + 3u) & ~3u; if (keep >= s->frames) continue;
+        if (first) saved += s->frames - keep;
+    }
+    for (uint32_t i = 0; i < zone_count; ++i) { /* apply after measuring, so shared samples measure alike */
+        afx_c_sample_t *s = &zones[i].sample; uint32_t keep = 0;
+        for (uint32_t j = 0; j < zone_count; ++j) if (zones[j].sample.data == s->data && reach[j] > keep) keep = reach[j];
+        if (!keep || keep >= s->frames || s->format == AFX_ADPCM) continue;
+        keep = (keep + 3u) & ~3u; if (keep >= s->frames) continue;
+        s->frames = keep; s->bytes = s->format == AFX_PCM16 ? keep * 2u : keep;
+        if (s->loop_end >= keep) s->loop_end = (uint16_t)(keep - 1u);
+        if (s->loop_start > s->loop_end) s->loop_start = s->loop_end;
+    }
+    return saved;
+}
+
+/* ---------------------------------------------------------------- sections from a timeline */
+typedef struct {
+    uint32_t start, last, cut, keyoff, first; /* ticks; cut/keyoff UINT32_MAX for none; first: its NOTE */
+    uint16_t ad, dr, pitch; uint8_t channel;
+} split_voice_t;
+
+/* When the voice's envelope is 60 dB down, each stage taken from full level; UINT32_MAX when it holds. */
+static uint32_t split_quiet(const split_voice_t *v, uint32_t keyoff) {
+    const double quiet = 640.0;
+    if (keyoff != UINT32_MAX) {
+        int rr = reach_rate(v->dr, v->pitch, v->dr & 31);
+        if (rr < 2) return UINT32_MAX;
+        return keyoff + (uint32_t)ceil(reach_decay_ms[rr] * quiet / 1024.0) + 1u;
+    }
+    int ar = reach_rate(v->dr, v->pitch, v->ad & 31), d1 = reach_rate(v->dr, v->pitch, (v->ad >> 6) & 31);
+    int d2 = reach_rate(v->dr, v->pitch, (v->ad >> 11) & 31);
+    double level = ((v->dr >> 5) & 31) * 32.0, ms = ar < 2 ? 0 : reach_attack_ms[ar];
+    if (level >= quiet) { if (d1 < 2) return UINT32_MAX; ms += reach_decay_ms[d1] * quiet / 1024.0; }
+    else {
+        if (level > 0) { if (d1 < 2) return UINT32_MAX; ms += reach_decay_ms[d1] * level / 1024.0; }
+        if (d2 < 2) return UINT32_MAX;
+        ms += reach_decay_ms[d2] * (quiet - level) / 1024.0;
+    }
+    return v->start + (uint32_t)ceil(ms) + 1u;
+}
+
+typedef struct { uint32_t index, tick; uint8_t opcode, channel; } split_item_t; /* index UINT32_MAX: made here */
+
+static int compare_split_items(const void *a, const void *b) {
+    const split_item_t *x = a, *y = b;
+    if (x->tick != y->tick) return x->tick < y->tick ? -1 : 1;
+    uint32_t xi = x->index == UINT32_MAX ? UINT32_MAX - 1u : x->index, yi = y->index == UINT32_MAX ? UINT32_MAX - 1u : y->index;
+    if (xi != yi) return xi < yi ? -1 : 1;
+    return (x->opcode > y->opcode) - (x->opcode < y->opcode); /* KEYOFF before FREE */
+}
+
+/* The section the order goes on to after window w (-1: none or several). */
+static int split_next(uint32_t w, const uint16_t *order, uint32_t order_count, uint32_t loop_index) {
+    int next = -1;
+    for (uint32_t k = 0; k < order_count; ++k) {
+        if (order[k] != w) continue;
+        int after = k + 1u < order_count ? order[k + 1u] : loop_index != AFX_C_SONG_ENDS ? order[loop_index] : -2;
+        if (after == -2 || (next >= 0 && after != next)) return -1;
+        next = after;
+    }
+    return next;
+}
+
+int afx_c_split_sections(const afx_c_event_t *events, uint32_t count, uint32_t end_tick,
+                         const afx_c_zone_t *zones, uint32_t zone_count,
+                         const afx_c_window_t *windows, uint32_t window_count,
+                         const uint16_t *order, uint32_t order_count, uint32_t loop_index,
+                         afx_c_event_t **out_events, afx_c_section_t *out_sections, afx_c_split_report_t *report) {
+    if (!events || !count || !zones || !windows || !window_count || window_count > AFX_C_MAX_SECTIONS || !order ||
+        !order_count || !out_events || !out_sections || (loop_index != AFX_C_SONG_ENDS && loop_index >= order_count))
+        return -1;
+    *out_events = NULL;
+    if (report) *report = (afx_c_split_report_t){0};
+    for (uint32_t k = 0; k < order_count; ++k) if (order[k] >= window_count) return -1;
+    for (uint32_t w = 0; w < window_count; ++w) {
+        const afx_c_window_t *a = &windows[w];
+        if (a->end <= a->start || (a->overlap && a->overlap <= a->end) || a->join > AFX_JOIN_CONTINUE ||
+            (a->join == AFX_JOIN_CONTINUE && a->overlap)) return -1;
+        for (uint32_t v = 0; v < w; ++v) if (a->start < windows[v].end && windows[v].start < a->end) return -1;
+    }
+    int status = -1;
+    split_voice_t *voices = calloc(count + 1u, sizeof(*voices));
+    uint32_t *owner = malloc((count + 1u) * sizeof(*owner)), voice_count = 0, current[AFX_MAX_FLOW_CHANNELS];
+    uint8_t *section_of = NULL, continued[AFX_C_MAX_SECTIONS] = {0};
+    split_item_t *items = NULL; afx_c_event_t *all = NULL;
+    for (uint32_t c = 0; c < AFX_MAX_FLOW_CHANNELS; ++c) current[c] = UINT32_MAX;
+    if (!voices || !owner) goto done;
+    for (uint32_t e = 0; e < count; ++e) {
+        const afx_c_event_t *event = &events[e]; uint8_t c = event->channel; owner[e] = UINT32_MAX;
+        if (c >= AFX_MAX_FLOW_CHANNELS || (e && event->tick < events[e - 1u].tick)) goto done;
+        if (event->opcode == AFX_OP_NOTE) {
+            if (event->setup >= zone_count) goto done;
+            const afx_c_zone_t *z = &zones[event->setup]; uint16_t word[AFX_FIELD_COUNT];
+            for (int f = 0; f < AFX_FIELD_COUNT; ++f)
+                word[f] = (event->mask & (1u << f)) ? event->fields[f] : (z->setup_mask & (1u << f)) ? z->setup[f] : event->fields[f];
+            if (current[c] != UINT32_MAX) voices[current[c]].cut = event->tick;
+            current[c] = voice_count;
+            voices[voice_count++] = (split_voice_t){event->tick, event->tick, UINT32_MAX, UINT32_MAX, e,
+                word[AFX_FIELD_ENV_AD], word[AFX_FIELD_ENV_DR], word[AFX_FIELD_PITCH], c};
+        }
+        if (current[c] == UINT32_MAX) continue;
+        split_voice_t *v = &voices[current[c]]; owner[e] = current[c]; v->last = event->tick;
+        if (event->opcode == AFX_OP_KEYOFF && v->keyoff == UINT32_MAX) v->keyoff = event->tick;
+        if (event->opcode == AFX_OP_PATCH) {
+            if (event->mask & (1u << AFX_FIELD_ENV_AD)) v->ad = event->fields[AFX_FIELD_ENV_AD];
+            if (event->mask & (1u << AFX_FIELD_ENV_DR)) v->dr = event->fields[AFX_FIELD_ENV_DR];
+            if (event->mask & (1u << AFX_FIELD_PITCH)) v->pitch = event->fields[AFX_FIELD_PITCH];
+        }
+    }
+    /* Which window each voice belongs to: the one its NOTE starts in, or, in an overlap, the window before it
+     * when the note is no copy of one at the same place in the opening of the window the order goes on to. */
+    section_of = malloc(voice_count + 1u);
+    if (!section_of) goto done;
+    /* A window entered by a continue join plays on with the voices before it: it also takes their events. */
+    for (uint32_t k = 0; k < order_count; ++k) {
+        if (k && windows[order[k - 1u]].join == AFX_JOIN_CONTINUE) continued[order[k]] = 1;
+        if (k == loop_index && windows[order[order_count - 1u]].join == AFX_JOIN_CONTINUE) continued[order[k]] = 1;
+    }
+    for (uint32_t i = 0; i < voice_count; ++i) {
+        split_voice_t *v = &voices[i]; section_of[i] = 0xff;
+        for (uint32_t w = 0; w < window_count; ++w) if (v->start >= windows[w].start && v->start < windows[w].end) section_of[i] = (uint8_t)w;
+        for (uint32_t w = 0; w < window_count && section_of[i] == 0xff; ++w) {
+            const afx_c_window_t *a = &windows[w];
+            if (!a->overlap || v->start < a->end || v->start >= a->overlap) continue;
+            int next = split_next(w, order, order_count, loop_index);
+            if (next < 0) goto done;
+            const afx_c_event_t *note = &events[v->first]; int copy = 0;
+            uint32_t span = a->overlap - a->end, base = windows[next].start;
+            for (uint32_t j = 0; j < voice_count && !copy; ++j) {
+                const split_voice_t *x = &voices[j]; const afx_c_event_t *other = &events[x->first];
+                if (x->start < base || x->start >= base + span) continue;
+                uint32_t at = x->start - base + a->end;
+                copy = at + 15u >= v->start && at <= v->start + 15u && other->setup == note->setup &&
+                       !memcmp(other->fields, note->fields, sizeof(note->fields));
+            }
+            if (!copy) section_of[i] = (uint8_t)w;
+        }
+    }
+    uint32_t capacity = count * 2u + 4096u, n = 0, first[AFX_C_MAX_SECTIONS + 1], body[AFX_C_MAX_SECTIONS], last[AFX_C_MAX_SECTIONS];
+    items = malloc(capacity * sizeof(*items));
+    if (!items) goto done;
+    for (uint32_t w = 0; w < window_count; ++w) {
+        const afx_c_window_t *a = &windows[w];
+        first[w] = n; body[w] = a->end - a->start; last[w] = body[w];
+        uint32_t last_voice[AFX_MAX_FLOW_CHANNELS]; for (uint32_t c = 0; c < AFX_MAX_FLOW_CHANNELS; ++c) last_voice[c] = UINT32_MAX;
+        for (uint32_t e = 0; e < count; ++e) {
+            if (owner[e] == UINT32_MAX) continue;
+            uint32_t t = events[e].tick, s = section_of[owner[e]];
+            int mine = a->join == AFX_JOIN_CONTINUE ? t >= a->start && t < a->end
+                     : s == w || (continued[w] && t >= a->start && t < a->end && voices[owner[e]].start < a->start);
+            if (!mine) continue;
+            if (n + 2u >= capacity) goto done;
+            items[n++] = (split_item_t){e, t - a->start, events[e].opcode, events[e].channel};
+            if (events[e].opcode == AFX_OP_NOTE && s == w) last_voice[events[e].channel] = owner[e];
+        }
+        if (a->join == AFX_JOIN_NEW)
+            for (uint32_t i = 0; i < voice_count; ++i) {
+                if (section_of[i] != w) continue;
+                split_voice_t *v = &voices[i];
+                /* Taken after the body by another play's note (or never): key it off there if it still sounds. */
+                uint32_t cut = v->cut != UINT32_MAX ? v->cut : end_tick, keyoff = v->keyoff;
+                if (keyoff == UINT32_MAX && cut >= a->end && split_quiet(v, UINT32_MAX) > cut) {
+                    if (n + 2u >= capacity || cut < a->start) goto done;
+                    items[n++] = (split_item_t){UINT32_MAX, cut - a->start, AFX_OP_KEYOFF, v->channel}; keyoff = cut;
+                    if (report) ++report->keyoffs;
+                }
+                if (last_voice[v->channel] == i) {
+                    uint32_t quiet = split_quiet(v, keyoff);
+                    if (quiet == UINT32_MAX) goto done; /* a voice that never ends cannot be given back */
+                    if (quiet < v->last + 1u) quiet = v->last + 1u;
+                    items[n++] = (split_item_t){UINT32_MAX, quiet - a->start, AFX_OP_FREE, v->channel};
+                    if (report) ++report->frees;
+                }
+            }
+        qsort(items + first[w], n - first[w], sizeof(*items), compare_split_items);
+        for (uint32_t k = first[w]; k < n; ++k) if (items[k].tick + 1u > last[w]) last[w] = items[k].tick + 1u;
+        if (a->join == AFX_JOIN_CONTINUE && last[w] != body[w]) goto done;
+    }
+    first[window_count] = n;
+    all = calloc(n + 1u, sizeof(*all));
+    if (!all) goto done;
+    for (uint32_t k = 0; k < n; ++k) {
+        if (items[k].index != UINT32_MAX) all[k] = events[items[k].index];
+        else { all[k].opcode = items[k].opcode; all[k].channel = items[k].channel; }
+        all[k].tick = items[k].tick; all[k].order = k;
+    }
+    for (uint32_t w = 0; w < window_count; ++w) {
+        out_sections[w] = (afx_c_section_t){all + first[w], first[w + 1] - first[w], body[w], last[w], windows[w].join};
+        if (report) report->tail_ticks[w] = last[w] - body[w];
+    }
+    *out_events = all; all = NULL; status = 0;
+done:
+    free(voices); free(owner); free(section_of); free(items); free(all);
+    return status;
+}
+
+int afx_c_compile_windows(const afx_c_event_t *events, uint32_t count, uint32_t end_tick,
+                          afx_c_zone_t *zones, uint32_t zone_count,
+                          const afx_c_window_t *windows, uint32_t window_count,
+                          const uint16_t *order, uint32_t order_count, uint32_t loop_index, int trim,
+                          int (*prepare)(afx_c_zone_t *templates, uint32_t template_count, void *user), void *user,
+                          const afx_c_zone_t *bank_zones, uint32_t bank_zone_count,
+                          uint32_t tick_rate, afx_c_output_t *out, afx_c_split_report_t *report) {
+    afx_c_event_t *split = NULL, *optimized = NULL; afx_c_zone_t *templates = NULL; uint32_t template_count = 0, total = 0;
+    afx_c_section_t sections[AFX_C_MAX_SECTIONS]; afx_c_split_report_t local; int status = -1;
+    if (!out) return -1;
+    *out = (afx_c_output_t){0};
+    if (!report) report = &local;
+    if (afx_c_split_sections(events, count, end_tick, zones, zone_count, windows, window_count, order, order_count,
+                             loop_index, &split, sections, report)) return -1;
+    for (uint32_t w = 0; w < window_count; ++w) total += sections[w].count;
+    if (trim) { /* each section on its own channels: what it reads of each sample */
+        uint32_t *reach = calloc(zone_count, sizeof(*reach));
+        if (!reach) goto done;
+        for (uint32_t w = 0; w < window_count; ++w)
+            if (afx_c_sample_reach(sections[w].events, sections[w].count, zones, zone_count, tick_rate, reach)) { free(reach); goto done; }
+        report->trimmed = afx_c_trim_zones(zones, zone_count, reach); free(reach);
+    }
+    if (afx_c_optimize_events(split, total, zones, zone_count, &optimized, &templates, &template_count)) goto done;
+    if (prepare && prepare(templates, template_count, user)) goto done;
+    for (uint32_t w = 0, at = 0; w < window_count; at += sections[w++].count) sections[w].events = optimized + at;
+    if (compile_song(sections, window_count, order, order_count, loop_index, NULL, 0, tick_rate, templates, template_count,
+                     bank_zones ? bank_zones : templates, bank_zones ? bank_zone_count : template_count, out)) goto done;
+    status = 0;
+done:
+    free(split); free(optimized); free(templates);
+    if (status) afx_c_output_free(out);
+    return status;
 }

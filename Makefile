@@ -54,17 +54,17 @@ $(DEMO_ASSETS): $(SRC)/afx_demo_assets.c $(SRC)/afx_compile_c.c $(SRC)/afx_compi
 	mkdir -p "$(BUILD)"
 	$(CC) $(CFLAGS) -I$(FORMAT)/include $(SRC)/afx_demo_assets.c $(SRC)/afx_compile_c.c $(FORMAT)/src/codec.c -lm -o $@
 
-$(BANK_COMPILER): $(SRC)/afx_bank_c.c $(SRC)/afx_compile_c.c $(SRC)/afx_compile_c.h $(SRC)/afx_midi_c.c $(SRC)/afx_midi_c.h $(SRC)/afx_sample_c.c $(SRC)/afx_sample_c.h $(SRC)/afx_sf2_c.c $(SRC)/afx_sf2_c.h $(SRC)/afx_ya2beam.c $(FORMAT)/src/codec.c $(FORMAT)/include/aicaflow/codec.h $(FORMAT)/include/aicaflow/format.h
+$(BANK_COMPILER): $(SRC)/afx_bank_c.c $(SRC)/afx_map_c.c $(SRC)/afx_map_c.h $(SRC)/afx_compile_c.c $(SRC)/afx_compile_c.h $(SRC)/afx_midi_c.c $(SRC)/afx_midi_c.h $(SRC)/afx_sample_c.c $(SRC)/afx_sample_c.h $(SRC)/afx_sf2_c.c $(SRC)/afx_sf2_c.h $(SRC)/afx_ya2beam.c $(FORMAT)/src/codec.c $(FORMAT)/include/aicaflow/codec.h $(FORMAT)/include/aicaflow/format.h
 	mkdir -p "$(BUILD)"
-	$(CC) $(CFLAGS) -I$(FORMAT)/include $(SRC)/afx_bank_c.c $(SRC)/afx_compile_c.c $(SRC)/afx_midi_c.c $(SRC)/afx_sample_c.c $(SRC)/afx_sf2_c.c $(SRC)/afx_ya2beam.c $(FORMAT)/src/codec.c -lm -o $@
+	$(CC) $(CFLAGS) -I$(FORMAT)/include $(SRC)/afx_bank_c.c $(SRC)/afx_map_c.c $(SRC)/afx_compile_c.c $(SRC)/afx_midi_c.c $(SRC)/afx_sample_c.c $(SRC)/afx_sf2_c.c $(SRC)/afx_ya2beam.c $(FORMAT)/src/codec.c -lm -o $@
 
 $(PROFILE_COMPILER): $(SRC)/afx_profile_c.c $(SRC)/afx_compile_c.c $(SRC)/afx_compile_c.h $(FORMAT)/src/codec.c $(FORMAT)/include/aicaflow/codec.h $(FORMAT)/include/aicaflow/format.h
 	mkdir -p "$(BUILD)"
 	$(CC) $(CFLAGS) -I$(FORMAT)/include $(SRC)/afx_profile_c.c $(SRC)/afx_compile_c.c $(FORMAT)/src/codec.c -lm -o $@
 
-$(VGM_COMPILER): $(SRC)/afx_vgm.c $(SRC)/afx_compile_c.c $(SRC)/afx_compile_c.h $(SRC)/afx_sample_c.c $(SRC)/afx_sample_c.h $(SRC)/afx_ya2beam.c $(FORMAT)/src/codec.c $(FORMAT)/include/aicaflow/codec.h $(FORMAT)/include/aicaflow/format.h
+$(VGM_COMPILER): $(SRC)/afx_vgm.c $(SRC)/afx_map_c.c $(SRC)/afx_map_c.h $(SRC)/afx_compile_c.c $(SRC)/afx_compile_c.h $(SRC)/afx_sample_c.c $(SRC)/afx_sample_c.h $(SRC)/afx_ya2beam.c $(FORMAT)/src/codec.c $(FORMAT)/include/aicaflow/codec.h $(FORMAT)/include/aicaflow/format.h
 	mkdir -p "$(BUILD)"
-	$(CC) $(CFLAGS) -I$(FORMAT)/include -I$(SRC) $(SRC)/afx_vgm.c $(SRC)/afx_compile_c.c $(SRC)/afx_sample_c.c $(SRC)/afx_ya2beam.c $(FORMAT)/src/codec.c -lm -lz -o $@
+	$(CC) $(CFLAGS) -I$(FORMAT)/include -I$(SRC) $(SRC)/afx_vgm.c $(SRC)/afx_map_c.c $(SRC)/afx_compile_c.c $(SRC)/afx_sample_c.c $(SRC)/afx_ya2beam.c $(FORMAT)/src/codec.c -lm -lz -o $@
 
 $(N64_COMPILER): $(SRC)/afx_n64.c $(SRC)/afx_n64_cseq.c $(SRC)/afx_n64_cseq.h $(SRC)/afx_compile_c.c $(SRC)/afx_compile_c.h $(SRC)/afx_sample_c.c $(SRC)/afx_sample_c.h $(SRC)/afx_ya2beam.c $(FORMAT)/src/codec.c $(FORMAT)/include/aicaflow/codec.h $(FORMAT)/include/aicaflow/format.h
 	mkdir -p "$(BUILD)"

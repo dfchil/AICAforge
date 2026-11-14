@@ -5,6 +5,7 @@
  * C3/B5 bank and register writes, and the ordinary VGM wait commands. */
 #include "afx_compile_c.h"
 #include "afx_sample_c.h"
+#include "afx_map_c.h"
 
 #include <aicaflow/codec.h>
 
@@ -29,6 +30,7 @@ typedef struct {
 } chip_t;
 typedef struct {
     chip_t chips[CHIPS]; uint32_t chip_count, elapsed, order;
+    uint32_t total_samples, loop_samples; /* VGM header: the recording's length and its loop's length. */
     raw_event_t *events; uint32_t event_count, event_capacity;
     sample_t *samples; uint32_t sample_count, sample_capacity;
     double gain_db;
@@ -376,6 +378,7 @@ static int parse_vgm(const char *path, double gain_db, parser_t *parser) {
     if (!clock || (le32(data + 0x34) > UINT32_MAX - 0x34u)) goto failed;
     position = 0x34u + le32(data + 0x34); if (position < 0x40 || position >= bytes) goto failed;
     parser->gain_db = gain_db;
+    parser->total_samples = le32(data + 0x18); parser->loop_samples = le32(data + 0x1c) ? le32(data + 0x20) : 0;
     for (uint32_t i = 0; i < parser->chip_count; ++i) parser->chips[i].pitch_ratio = (double)clock / 180.0 / VGM_RATE;
     stage = 2;
     while (position < bytes) {
@@ -455,19 +458,100 @@ failed:
     free(source); free(data); return -1;
 }
 
+/* ---------------------------------------------------------------- bank map
+ * afx_vgm reads an AFBM's `trim`, `song`, `section` and `order` lines (docs/specs/authoring-formats.md): the
+ * recording given on the command line is converted as the song named by --name (default: the output's file
+ * name), with that song's sections and order when it has them, and with its samples trimmed when the map
+ * says `trim`. A VGM carries its own samples, so `source` and `map` lines do not apply. */
+typedef struct { int trim, found; afx_map_structure_t structure; } vgm_map_t;
+
+static int read_vgm_map(const char *path, const char *name, vgm_map_t *map) {
+    FILE *file = fopen(path, "r"); char line[4096], song[AFX_MAP_NAME_BYTES]; int status = -1;
+    *map = (vgm_map_t){0};
+    if (!file) { fprintf(stderr, "afx_vgm: cannot read %s\n", path); return -1; }
+    for (unsigned number = 1; fgets(line, sizeof(line), file); ++number) {
+        char kind[16] = "", *cursor = line;
+        while (*cursor == ' ' || *cursor == '\t') ++cursor;
+        if (*cursor == '#' || *cursor == '\n' || *cursor == '\r' || !*cursor) continue;
+        sscanf(cursor, "%15s", kind);
+        int bad = 0;
+        if (!strcmp(kind, "trim")) { char extra[8]; bad = map->trim || sscanf(cursor, "trim %7s", extra) == 1; map->trim = 1; }
+        else if (!strcmp(kind, "song")) { bad = afx_map_line_song(cursor, song, sizeof(song)); if (!bad && !strcmp(song, name)) { bad = map->found; map->found = 1; } }
+        else if (!strcmp(kind, "section") || !strcmp(kind, "order")) {
+            bad = afx_map_line_song(cursor, song, sizeof(song));
+            if (!bad && !strcmp(song, name))
+                bad = !map->found || (kind[0] == 's' ? afx_map_parse_section(cursor, &map->structure) : afx_map_parse_order(cursor, &map->structure));
+        } else bad = 1;
+        if (bad) { fprintf(stderr, "afx_vgm: %s:%u: not a line afx_vgm takes here: %s", path, number, cursor); goto done; }
+    }
+    if (afx_map_structure_state(&map->structure) < 0) { fprintf(stderr, "afx_vgm: %s: song %s needs both sections and an order\n", path, name); goto done; }
+    status = 0;
+done:
+    fclose(file); return status;
+}
+
+typedef struct { uint8_t **data; uint32_t count; } adpcm_owned_t;
+static int encode_templates(afx_c_zone_t *templates, uint32_t count, void *user) {
+    adpcm_owned_t *owned = user;
+    return encode_adpcm_zones(templates, count, &owned->data, &owned->count);
+}
+
+static int compile_vgm_song(const parser_t *parser, const afx_c_event_t *events, uint32_t count,
+                            afx_c_zone_t *zones, uint32_t zone_count, const vgm_map_t *map, int adpcm,
+                            afx_c_output_t *out) {
+    const afx_map_structure_t *s = &map->structure; adpcm_owned_t owned = {0}; afx_c_split_report_t report;
+    uint32_t end = parser->total_samples ? tick(parser->total_samples) : tick(parser->elapsed);
+    int status = afx_c_compile_windows(events, count, end, zones, zone_count, s->windows, s->section_count,
+                                       s->order, s->order_count, s->loop_index, map->trim,
+                                       adpcm ? encode_templates : NULL, &owned, NULL, 0, TICK_RATE, out, &report);
+    for (uint32_t i = 0; i < owned.count; ++i) free(owned.data[i]);
+    free(owned.data);
+    if (status) { fprintf(stderr, "afx_vgm: the song's sections do not split this recording, or AICAflow would refuse the song\n"); return -1; }
+    printf("song: %u sections (", s->section_count);
+    for (uint32_t i = 0; i < s->section_count; ++i)
+        printf("%s%s %u ticks, tail %u", i ? "; " : "", s->names[i], s->windows[i].end - s->windows[i].start, report.tail_ticks[i]);
+    printf("); %u key-offs added, %u FREE; %u events moved by %u ticks", report.keyoffs, report.frees, out->moved_events, out->moved_ticks);
+    if (map->trim) printf("; %u sample frames never read, trimmed", report.trimmed);
+    printf("\n");
+    return 0;
+}
+
 int main(int argc, char **argv) {
-    const char *source = NULL, *output = NULL; double gain = -6.4; int adpcm = 0;
+    const char *source = NULL, *output = NULL, *map_path = NULL, *name = NULL; double gain = -6.4; int adpcm = 0;
     for (int i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--adpcm")) adpcm = 1;
         else if (!strcmp(argv[i], "--gain-db") && i + 1 < argc) gain = strtod(argv[++i], NULL);
-        else if (!source) source = argv[i]; else if (!output) output = argv[i]; else { fprintf(stderr, "usage: afx_vgm SOURCE.vgm|vgz OUTPUT.afx [--gain-db DB] [--adpcm]\n"); return 2; }
+        else if (!strcmp(argv[i], "--map") && i + 1 < argc) map_path = argv[++i];
+        else if (!strcmp(argv[i], "--name") && i + 1 < argc) name = argv[++i];
+        else if (!source) source = argv[i]; else if (!output) output = argv[i];
+        else { fprintf(stderr, "usage: afx_vgm SOURCE.vgm|vgz OUTPUT.afx|OUTPUT.afm [--gain-db DB] [--adpcm] [--map BANK.afbm [--name SONG]]\n"); return 2; }
     }
-    if (!source || !output || !isfinite(gain) || gain < -48 || gain > 24) return 2;
+    if (!source || !output || !isfinite(gain) || gain < -48 || gain > 24 || (name && !map_path)) return 2;
+    /* The song the map describes: --name, else the output's file name without its extension. */
+    vgm_map_t map = {0}; char stem[AFX_MAP_NAME_BYTES] = "";
+    if (map_path) {
+        const char *base = strrchr(output, '/'); base = base ? base + 1 : output;
+        if (!name) { size_t n = strcspn(base, "."); if (n >= sizeof(stem)) return 2; memcpy(stem, base, n); stem[n] = 0; name = stem; }
+        if (read_vgm_map(map_path, name, &map)) return 1;
+    }
+    int song = afx_map_structure_state(&map.structure) == 1;
     parser_t parser = {0}; afx_c_event_t *events = NULL; afx_c_zone_t *zones = NULL; uint32_t count = 0, zone_count = 0;
     afx_c_event_t *optimized = NULL; afx_c_zone_t *templates = NULL; uint32_t template_count = 0;
     afx_c_output_t result = {0}; char *bank = NULL, *seek = NULL, *visual = NULL; uint8_t **adpcm_data = NULL; uint32_t adpcm_count = 0; int status = 1;
     if (parse_vgm(source, gain, &parser)) { fprintf(stderr, "afx_vgm: cannot parse %s\n", source); goto done; }
     if (compact(&parser, &events, &count, &zones, &zone_count) || !count || !zone_count) { fprintf(stderr, "afx_vgm: cannot lower source events\n"); goto done; }
+    if (song) {
+        if (compile_vgm_song(&parser, events, count, zones, zone_count, &map, adpcm, &result)) goto done;
+        bank = with_suffix(output, ".afb");
+        if (!bank || write_file(output, result.afm, result.afm_bytes) || write_file(bank, result.afb, result.afb_bytes)) goto done;
+        printf("wrote %s (%u AFM, %u AFB)\n", output, result.afm_bytes, result.afb_bytes);
+        status = 0; goto done;
+    }
+    if (map.trim) {
+        uint32_t *reach = calloc(zone_count, sizeof(*reach));
+        if (!reach || afx_c_sample_reach(events, count, zones, zone_count, TICK_RATE, reach)) { free(reach); fprintf(stderr, "afx_vgm: cannot measure the samples' reach\n"); goto done; }
+        printf("%u sample frames never read, trimmed\n", afx_c_trim_zones(zones, zone_count, reach)); free(reach);
+    }
     if (afx_c_optimize_events(events, count, zones, zone_count, &optimized, &templates, &template_count)) {
         fprintf(stderr, "afx_vgm: cannot optimize source events\n"); goto done;
     }

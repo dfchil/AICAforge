@@ -369,6 +369,24 @@ same event pipeline and emits AFB/AFX/AFC/AFV. PCM8 is the default; `--adpcm`
 explicitly selects encoding. Default gain is -6.4 dB. It is not a general VGM
 chip emulator: YM2612, PSG and arbitrary chips are not supported by this tool.
 
+```sh
+build/afx_vgm race.vgz t04.afm --map music.afbm
+build/afx_vgm race.vgz t04.afm --map music.afbm --name t04 --adpcm
+```
+
+`--map` reads a bank map's `trim`, `song`, `section` and `order` lines
+([AFBM](specs/authoring-formats.md#afbm-reference)) for the song named by
+`--name`, or by the output's file name. With sections and an order the
+recording becomes a song (AFM and AFB): for one that plays an intro, a part A
+twice and a part B and loops back into A, A is one section listed twice. Each
+section keeps the recording's own voice allocation and lets its voices ring
+out; a voice the source stopped only by taking its channel is keyed off
+there, and each channel's last voice is given back (`FREE`) once its envelope
+is 60 dB down. `trim` keeps only the sample frames the notes read. A map
+names no `source` or `map` lines for a VGM: the recording carries its
+samples. `afx_c_split_sections`, `afx_c_compile_windows`,
+`afx_c_sample_reach` and `afx_c_trim_zones` do the same for any importer.
+
 ## Output and resource budgets
 
 The shared emitter generates AFC checkpoints at tick zero and every 10 authored
